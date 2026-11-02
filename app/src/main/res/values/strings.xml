@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ipaloader</string>
+    <string name="login">登入</string>
+    <string name="rust_core_missing">Rust 核心未載入</string>
+</resources>
