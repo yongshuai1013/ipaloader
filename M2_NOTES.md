@@ -214,3 +214,47 @@ provider 的 `get_client_info()`（或 override）。也就是：
 - **真機安裝注意**：證書已換，裝 0.2.4 前須先卸除舊版
   （Pax 金鑰簽的 0.2.2／0.2.3 或 MT 重簽版），之後同證書版本
   可直接覆蓋更新。待真機驗：Play Protect 提示與登入實測。
+
+## 修登入閃退＋日誌功能＋panic 攔截（v0.2.5，2026-11-02）
+
+- 閃退定案：isideload 0.5.2 釘 reqwest 的 `rustls-no-provider`，
+  宿主必須先安裝 rustls CryptoProvider；我們從未安裝，
+  do_login 第一步建 RemoteV3AnisetteProvider 時 reqwest 建構
+  panic，release 的 `panic="abort"` 使其變 SIGABRT——按登入瞬間
+  閃退。JNI 符號、簽名對齊、tokio 上下文、callback 描述符經逐項
+  查證皆無問題。
+- 主修：`init_core()`（OnceLock/Once 全域初始化）在任何建 client
+  的路徑之前執行
+  `rustls::crypto::aws_lc_rs::default_provider().install_default()`
+  （重複安裝的 Err 忽略）；Cargo.toml 直依 rustls 0.23
+  （default-features=false＋aws_lc_rs/std/tls12，與 Cargo.lock
+  內的 0.23.46 對齊）。同處設 panic hook 把 panic 訊息寫進日誌。
+- panic 攔截：release profile 改 `panic="unwind"`；nativeLogin／
+  nativeRestoreSession 本體包 catch_unwind，panic 時回
+  `ERR\nPANIC\n<訊息>` 協定字串，Kotlin 側翻成「內部錯誤
+  （已記錄日誌）」。
+- 順修：`classify()` 的 `String::truncate(220)` 改字元邊界安全
+  截斷（多字節字元落在 220 處原本會 panic）。
+- 日誌功能（永帥點名要的）：`<filesDir>/core/ipaloader.log`，
+  append、每行帶時間戳（Rust 側 [core]、Kotlin 側 [app] 共用
+  一檔）。Rust 記登入里程碑（開始、anisette 取得、SRP 結果、
+  2FA 事件種類、錯誤全文鏈、panic）；Kotlin 記按鈕與對話框
+  動作。紅線：密碼、2FA 碼、session/spd/token 內容不寫日誌。
+  UI：主畫面「日誌」鈕進 LogActivity（Holo 深色、等寬字、
+  可捲動），頁內「複製全部」與「清除」。
+- CI run 41455183303（workflow #13），commit
+  `eece3408e2adfc12ca3741cc590478c044902060`，兩次讀數一致、
+  jobs 12 步驟全綠。
+- 驗包（artifact 13146358888，repo 級清單核對後下載實查）：
+  - apksigner：v2 ✔／v3 ✔；簽名者為永帥證書 DN
+    `CN=yongshuai, OU=yongshuai, O=yongshuai, L=, ST=TW, C=TW`，
+    SHA-256 `a409afe8…c6acee` ✔
+  - package `com.yongshuai.ipaloader`、versionCode 7／0.2.5、
+    minSdk 26／targetSdk 34 ✔；theme `@0x0103006b`（Theme.Holo）✔
+  - `.so` 在包內（11.99 MB，含 unwind 表與 aws-lc provider），
+    四個 JNI 符號齊全；新字串實查在包內：`ipaloader.log`、
+    `core init: rustls CryptoProvider (aws-lc-rs) installed`、
+    `login start:` ✔
+- **真機安裝注意**：與 0.2.4 同證書，可直接覆蓋更新免卸除。
+  待真機驗：按登入應走到網路／2FA 或顯示錯誤（不再閃退）；
+  日誌頁應有全程紀錄；登入＋2FA 實測。
