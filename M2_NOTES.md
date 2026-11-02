@@ -404,3 +404,51 @@ verifier 0.7.1／isideload 0.5.2 三方原始碼後，確認是三層：
   更新。待真機驗：登入成功 → 劃掉重開 → 帳密應自動
   帶入、CheckBox 呈勾選；取消勾選再登入成功 → 重開
   應空白。
+
+## 0.2.9 listTeams 的 TLS UnknownIssuer 修復（2026-11-02）
+
+- **真機定案（0.2.8 日誌）**：登入全鏈已通（SRP＋SMS
+  2FA＋session 保存＋記住帳密皆成功），但 restore／登入後
+  的 `list_teams` 打 `developerservices2.apple.com` 時
+  `InvalidCertificate(UnknownIssuer)`。該端點憑證鏈是
+  公共 CA 根；0.2.6 的 vendored patch 把共用 client 改
+  `tls_certs_only`（只信 Apple 根）後，DeveloperSession
+  共用的同一個 GrandSlam client 也只信 Apple 根——GS
+  端點（Apple 根鏈）正常、開發者服務（公共根鏈）被擋。
+  正是 0.2.6 筆記裡標記的殘留假設成真。
+- **修法（vendored patch 第二代，仍只動建構點一處）**：
+  `GrandSlam::build_reqwest_client` 改走 preconfigured
+  rustls——新增 helper `apple_and_webpki_tls_config()`：
+  RootCertStore 同時放 WebPKI 公共根
+  （`webpki_roots::TLS_SERVER_ROOTS`）與內嵌 Apple 根
+  （`APPLE_ROOT` 的 CertificateDer），
+  `ClientConfig::builder().with_root_certificates(..)
+  .with_no_client_auth()`，ALPN 對齊 reqwest 預設
+  （h2＋http/1.1）；建構改
+  `.tls_backend_preconfigured(config)` 取代
+  `tls_certs_only`。原始碼核對：reqwest 0.13.5 的
+  BuiltRustls 路徑直接用此 config，不經 Android 上會
+  無條件回錯的 extra-roots 分支，兩家端點都能驗。
+  vendored Cargo.toml 只多一條直接依賴
+  `webpki-roots 0.26`（lock 內已有 0.26.11；rustls
+  0.23 原本就是 vendored 的直接依賴）。anisette
+  remote_v3 的 client 已通、不動。
+- versionCode 11／versionName 0.2.9；簽名沿用永帥
+  keystore＋V1+V2+V3。
+- CI run 41469539491（workflow #21），遠端 commit
+  `d0342bbf8d4bbd344fa6b8d4ee8995d4bbc67e36`，兩次
+  讀數一致、jobs 全步驟綠。
+- 驗包（artifact 13153867976，repo 級清單按 run 號
+  核對 ID 後下載，大小 10,592,981 B 與清單一致）：
+  - apksigner：v2 ✔／v3 ✔；簽名者永帥證書 SHA-256
+    `a409afe8…c6acee` ✔
+  - package `com.yongshuai.ipaloader`、versionCode 11／
+    0.2.9、minSdk 26／targetSdk 34 ✔；theme
+    `@0x0103006b`（Theme.Holo）✔
+  - .so（12,084,632 B）四個 JNI 符號齊全；符號實查
+    含 `ClientBuilder::tls_backend_preconfigured
+    (rustls ClientConfig)` 的 isideload 呼叫點 ✔
+- **真機預期**：與 0.2.4 起同證書，可直接覆蓋更新。
+  重開 App 走 restore → list_teams 應得到 HTTP 回應：
+  團隊名顯示出來，或日誌呈現 Apple 回應內容（例如
+  新號團隊未開通的訊息）；不再是 TLS 錯誤。
