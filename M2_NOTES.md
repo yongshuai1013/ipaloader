@@ -337,3 +337,37 @@ verifier 0.7.1／isideload 0.5.2 三方原始碼後，確認是三層：
   更新。待真機驗：按登入後 SRP 應真正發出——日誌應出現
   `platform verifier init ok`，並走到 SRP 結果或 2FA
   對話框；若再有 TLS 問題，日誌會留下完整錯誤鏈。
+## 0.2.7 anisette URL 雙斜線修復（2026-11-02）
+
+- **症狀（0.2.6 真機日誌）**：SRP 已能真正發出，但登入死在
+  anisette provisioning：WS 連線 `.../remote_v3/websocket.rs`
+  回 HTTP 404「Failed to connect to provisioning socket」。
+- **根因**：`rust/src/lib.rs` 的 `ANISETTE_URL =
+  "https://ani2.stikstore.app/"` 帶尾斜線，vendored isideload
+  以 `format!("{}/v3/...")` 拼接 → `//v3/client_info`、
+  `//v3/get_headers`、`//v3/provisioning_session` 全被伺服器
+  404。主線實測對照：雙斜線兩路徑皆 404；單斜線
+  `GET /v3/client_info` = 200、`WS /v3/provisioning_session`
+  握手 = 101。
+- **修法（單點）**：常數改為無尾斜線
+  `"https://ani2.stikstore.app"`；全倉 grep 確認該常數僅
+  lib.rs 一處定義、一處使用，vendored 三個拼接點皆假設
+  無尾斜線，無其他受影響處。
+- versionCode 9／versionName 0.2.7；其餘零改動；簽名沿用
+  永帥 keystore＋V1+V2+V3。本機 `cargo check --target
+  aarch64-linux-android` 先過再推。
+- CI run 41461306166（workflow #17），commit
+  `7c471bb181baec17a7eedb655492287487ef012d`，兩次讀數
+  一致、jobs 12 步驟全綠。
+- 驗包（artifact 13149566196，repo 級清單核對 ID 後
+  下載，大小 10,493,554 B 與清單一致）：
+  - apksigner：v2 ✔／v3 ✔（`--min-sdk-version 23` 下
+    v1 亦 ✔）；簽名者永帥證書 SHA-256 `a409afe8…c6acee` ✔
+  - package `com.yongshuai.ipaloader`、versionCode 9／
+    0.2.7、minSdk 26／targetSdk 34 ✔；theme
+    `@0x0103006b`（Theme.Holo）✔
+  - `.so` 字串實查：`https://ani2.stikstore.app`（無尾
+    斜線）✔、尾斜線形式計數 0 ✔；四個 JNI 符號齊全 ✔
+- **真機安裝注意**：與 0.2.4 起同證書，可直接覆蓋更新。
+  待真機驗：按登入後 provisioning WS 應連通（不再出現
+  404 的 provisioning 錯誤），走到 SRP 結果或 2FA 對話框。
