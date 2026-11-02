@@ -1492,6 +1492,9 @@ dependencies = [
  "idevice",
  "isideload",
  "jni 0.21.1",
+ "plist",
+ "rootcause",
+ "tokio",
 ]
 
 [[package]]

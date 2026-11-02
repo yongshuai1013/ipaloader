@@ -2,5 +2,41 @@
 <resources>
     <string name="app_name">ipaloader</string>
     <string name="login">登入</string>
+    <string name="logout">登出</string>
+    <string name="cancel">取消</string>
     <string name="rust_core_missing">Rust 核心未載入</string>
+
+    <string name="email_hint">Apple ID（電子郵件）</string>
+    <string name="password_hint">密碼</string>
+
+    <string name="status_checking">正在檢查登入狀態…</string>
+    <string name="status_please_login">請登入 Apple ID</string>
+    <string name="status_logging_in">正在登入…</string>
+    <string name="status_logged_in">已登入</string>
+    <string name="status_logging_out">正在登出…</string>
+    <string name="status_logged_out">已登出</string>
+    <string name="status_restore_failed">無法沿用先前的登入：%1$s</string>
+    <string name="logged_in_as">帳號：%1$s</string>
+    <string name="team_label">團隊：%1$s</string>
+    <string name="team_unknown">團隊：已登入（團隊資訊未取得）</string>
+
+    <string name="error_empty_fields">請輸入 Apple ID 與密碼</string>
+    <string name="error_bad_credentials">Apple ID 或密碼不正確，請確認後再試一次。</string>
+    <string name="error_cancelled">已取消登入。</string>
+    <string name="error_network">網路連線失敗，請檢查網路後再試一次。</string>
+    <string name="error_anisette">Anisette 來源異常，請稍後再試。（%1$s）</string>
+    <string name="error_unknown">登入失敗：%1$s</string>
+
+    <string name="tfa_title_device">信任裝置驗證</string>
+    <string name="tfa_title_sms">簡訊驗證</string>
+    <string name="tfa_title_unknown">選擇驗證方式</string>
+    <string name="tfa_prompt_device">請輸入傳送到你信任裝置的六位數驗證碼：</string>
+    <string name="tfa_prompt_sms">請輸入簡訊中的六位數驗證碼：</string>
+    <string name="tfa_prompt_unknown">上一個驗證方式未完成，請選擇驗證方式：</string>
+    <string name="tfa_last_error">上次嘗試：%1$s</string>
+    <string name="tfa_code_hint">驗證碼</string>
+    <string name="tfa_submit">提交驗證碼</string>
+    <string name="tfa_resend">重新發送</string>
+    <string name="tfa_send_devices">傳送到信任裝置</string>
+    <string name="tfa_send_sms">以簡訊傳送到 ••%1$s</string>
 </resources>
