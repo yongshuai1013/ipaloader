@@ -43,7 +43,7 @@ use rootcause::Report;
 /// Remote anisette (v3) server used for M2. StikStore runs a Sierra Mac
 /// ADI, so the client claim it reports is a Mac claim — the shape that
 /// passes Apple's current GrandSlam edge rules.
-const ANISETTE_URL: &str = "https://ani2.stikstore.app/";
+const ANISETTE_URL: &str = "https://ani2.stikstore.app";
 
 const SESSION_EMAIL_KEY: &str = "session_email";
 const SESSION_SPD_KEY: &str = "session_spd";
