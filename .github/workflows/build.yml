@@ -46,11 +46,15 @@ jobs:
       - name: Build APK
         run: |
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease assembleDebug --no-daemon
 
+      # Release comes out unsigned (no signing config yet); the debug APK
+      # is the one that can be installed on a device for M1 verification.
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: ipaloader-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: |
+            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/debug/*.apk
           if-no-files-found: error

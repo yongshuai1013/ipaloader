@@ -26,4 +26,18 @@
 
 ## CI／驗包結果
 
-（待 CI 完成後補）
+- Run 41435930482（2026-11-02 11:19:37Z 觸發，commit
+  `76ab5614675c8a03e80658035837a680b62a464c`）：全步驟 success
+  （NDK 安裝、Rust core 編譯、Gradle 打包、artifact 上傳）。
+- 驗包（下載 artifact 13136243093 後以 aapt2 實查）：
+  - package `app.ipaloader`、versionCode 1、versionName 0.1.0
+  - minSdkVersion 26、targetSdkVersion 34、compileSdk 34
+  - application theme = `@0x0103006b`，對照 AOSP public-final.xml
+    即 `Theme.Holo`（深色）✔
+  - launchable activity = `app.ipaloader.MainActivity`（exported）
+  - `lib/arm64-v8a/libipaloader_core.so` 在包內（ARM64 ELF），
+    匯出符號 `Java_app_ipaloader_MainActivity_nativeVersion` ✔
+- 簽名狀態：release APK 無簽名設定，出的是
+  `app-release-unsigned.apk`（不可直接安裝）；自本版起 CI 同時出
+  debug APK（`app-debug.apk`，debug 簽名可安裝）供真機驗 M1 畫面。
+  正式簽名設定留待發佈里程碑處理。
