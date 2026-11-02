@@ -2,8 +2,6 @@ use super::middleware::WasmProxyMiddleware;
 use plist::Dictionary;
 use plist_macro::plist_to_xml_string;
 use plist_macro::pretty_print_dictionary;
-#[cfg(not(feature = "wasm"))]
-use reqwest::Certificate;
 use reqwest::{
     ClientBuilder,
     header::{HeaderMap, HeaderValue},
@@ -23,6 +21,25 @@ pub struct GrandSlam {
     pub client: reqwest_middleware::ClientWithMiddleware,
     pub client_info: AnisetteClientInfo,
     url_bag: Dictionary,
+}
+
+/// Build the shared TLS config for the GrandSlam / developer-services
+/// client: one rustls root store holding BOTH the WebPKI public roots
+/// and the Apple Root CA (see the ipaloader patch note in
+/// `GrandSlam::build_reqwest_client` for why both families are needed).
+#[cfg(not(feature = "wasm"))]
+fn apple_and_webpki_tls_config() -> Result<rustls::ClientConfig, Report> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    roots.add(rustls::pki_types::CertificateDer::from(APPLE_ROOT))?;
+    let mut config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    // Mirror the ALPN reqwest itself sets for its default
+    // HttpVersionPref::All, so protocol negotiation is unchanged from a
+    // reqwest-built config.
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(config)
 }
 
 impl GrandSlam {
@@ -233,7 +250,8 @@ impl GrandSlam {
         Ok(headers)
     }
 
-    /// Build a reqwest client with the Apple root certificate
+    /// Build a reqwest client trusting the WebPKI roots plus the
+    /// Apple root certificate
     ///
     /// # Arguments
     /// - `debug`: DANGER, If true, accept invalid certificates and enable verbose connection logging
@@ -245,19 +263,27 @@ impl GrandSlam {
         proxy_url: Option<String>,
     ) -> Result<reqwest_middleware::ClientWithMiddleware, Report> {
         #[cfg(not(feature = "wasm"))]
-        let cert = Certificate::from_der(APPLE_ROOT)?;
-        #[cfg(not(feature = "wasm"))]
         let client = ClientBuilder::new()
-            // ipaloader patch (vendored isideload 0.5.2, one line):
-            // upstream's `.add_root_certificate(cert)` cannot build on
-            // Android with reqwest 0.13 — in the default (platform
-            // verifier) mode extra roots are unsupported there and
-            // client construction always fails with "rustls-platform-
-            // verifier could not load extra certs". `tls_certs_only`
-            // reaches the same trust anchor (GrandSlam endpoints chain
-            // to the Apple Root CA) through the WebPKI verifier, which
-            // does build on Android.
-            .tls_certs_only([cert])
+            // ipaloader patch (vendored isideload 0.5.2): hand reqwest
+            // one preconfigured rustls config whose root store holds
+            // the WebPKI roots AND the Apple Root CA.
+            //
+            // Upstream's `.add_root_certificate(APPLE_ROOT)` cannot
+            // build on Android with reqwest 0.13 — in the default
+            // (platform verifier) mode extra roots are unsupported
+            // there and construction always fails with
+            // "rustls-platform-verifier could not load extra certs".
+            // The first workaround, `.tls_certs_only([APPLE_ROOT])`,
+            // fixed GrandSlam (its endpoints chain to the Apple Root
+            // CA) but broke the developer-services requests that share
+            // this client through DeveloperSession:
+            // developerservices2.apple.com chains to a public CA root
+            // and failed on device with
+            // InvalidCertificate(UnknownIssuer). A preconfigured
+            // config never goes through the extra-roots code path and
+            // trusts both root families, so both endpoint families
+            // verify.
+            .tls_backend_preconfigured(apple_and_webpki_tls_config()?)
             .http1_title_case_headers()
             .danger_accept_invalid_certs(debug)
             .connection_verbose(debug)

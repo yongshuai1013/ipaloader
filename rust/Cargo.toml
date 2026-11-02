@@ -31,8 +31,9 @@ rustls-platform-verifier = "=0.7.1"
 jni22 = { package = "jni", version = "=0.22.4" }
 
 # Vendored isideload 0.5.2 (pristine crates.io copy in vendor/) with
-# exactly one patched line: GrandSlam's reqwest client now uses
-# tls_certs_only([Apple root]) instead of add_root_certificate, whose
+# exactly one patched area: GrandSlam's reqwest client is built with a
+# preconfigured rustls config trusting the WebPKI roots plus the Apple
+# Root CA, instead of upstream's add_root_certificate, whose
 # platform-verifier code path cannot build a client on Android at all
 # (see the comment at the patch site in
 # vendor/isideload/src/auth/grandslam.rs).

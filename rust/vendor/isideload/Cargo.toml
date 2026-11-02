@@ -207,6 +207,9 @@ features = ["v4"]
 [dependencies.web-time]
 version = "1"
 
+[dependencies.webpki-roots]
+version = "0.26"
+
 [dependencies.ws_stream_wasm]
 version = "0.7.5"
 optional = true

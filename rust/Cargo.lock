@@ -1547,6 +1547,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "web-time",
+ "webpki-roots 0.26.11",
  "x509-cert 0.2.5",
  "zip",
 ]
