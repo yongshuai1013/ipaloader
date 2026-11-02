@@ -258,3 +258,82 @@ provider 的 `get_client_info()`（或 override）。也就是：
 - **真機安裝注意**：與 0.2.4 同證書，可直接覆蓋更新免卸除。
   待真機驗：按登入應走到網路／2FA 或顯示錯誤（不再閃退）；
   日誌頁應有全程紀錄；登入＋2FA 實測。
+
+## 0.2.6 — 登入死在建 HTTP client 的真修復（2026-11-02 晚）
+
+0.2.5 真機日誌定案的錯誤鏈：`login: SRP login begin` →
+GrandSlam 建 client 失敗「Failed to build HTTP client /
+builder error / rustls-platform-verifier could not load extra
+certs」（isideload grandslam.rs:250），且被 classify 誤標
+NETWORK（實測網路正常）。讀 reqwest 0.13.5／rustls-platform-
+verifier 0.7.1／isideload 0.5.2 三方原始碼後，確認是三層：
+
+1. **建構期硬錯誤（本錯誤本體）**：isideload 用
+   `.add_root_certificate(APPLE_ROOT)` 加根憑證。reqwest
+   0.13.5 在 `!tls_certs_only`（平台驗證）模式下，Android 被
+   cfg 排除在 `new_with_extra_roots` 之外——RPV 的 Android
+   verifier 本來就不支援 extra roots——非空 root_certs 在
+   Android 上**無條件**回此 builder error，與執行期 init
+   無關，桌面平台（macOS/Windows/unix）則正常。
+2. **握手期缺 init**：RPV 在 Android 需先以 JavaVM＋應用
+   Context 呼叫 `android::init_with_env`，且 APK 內要有它的
+   Kotlin 元件 `org.rustls.platformverifier.
+   CertificateVerifier`（經 app class loader 以 JNI 呼叫），
+   兩者缺一，第一次平台驗證握手（anisette 抓取、portal
+   呼叫）就會失敗。0.2.5 兩者皆無（SRP 還沒走到握手就先死
+   在第 1 層）。
+3. **誤標**：client 建構錯誤被標 NETWORK。
+
+修法（commit `f091c47` 本地／遠端 `fc2a213f`）：
+
+- **vendored isideload 一行 patch**：crates.io 0.5.2 原樣
+  複製進 `rust/vendor/isideload`，`rust/Cargo.toml` 以
+  `[patch.crates-io]` 接入；grandslam.rs 的
+  `.add_root_certificate(cert)` 改為
+  `.tls_certs_only([cert])`——同一個 Apple 根信任錨改走
+  WebPKI verifier（GrandSlam 端點憑證鏈本就根於 Apple
+  Root CA），此路徑在 Android 可正常建構。其餘 vendored
+  內容零改動。
+- **RPV init**：四個 JNI 入口（nativeVersion／
+  nativeRestoreSession／nativeLogin／nativeLogout）以
+  AtomicBool 保證只做一次 `ensure_rpv_init`：以 jni 0.21
+  在 Activity 上取 `getApplicationContext`，橋接 jni 0.22
+  （Cargo.toml 以 `jni22` 改名直依 `=0.22.4`，與 lock 對齊）
+  的 `EnvUnowned::from_raw`＋`with_env` 呼叫
+  `rustls_platform_verifier::android::init_with_env`。
+  結果寫入現有日誌（`platform verifier init ok`／
+  `platform verifier init FAILED: …`；nativeVersion 先於
+  日誌路徑就緒時先暫存，init_core 補寫）。`rustls-
+  platform-verifier = "=0.7.1"` 直依（對齊 lock）。
+- **Kotlin 元件進包**：settings.gradle.kts 的
+  dependencyResolutionManagement 加 rustls 官方 maven
+  倉（GitHub maven-archive）；app 依賴
+  `org.rustls:rustls-platform-verifier:0.2.0`（版本須與
+  Cargo.lock 的 rustls-platform-verifier-android crate
+  版本一致，現同為 0.2.0）。
+- **classify 順修**：錯誤鏈含「failed to build http
+  client」→ UNKNOWN（優先於 NETWORK 桶），畫面顯示原始
+  訊息，不再誤導成網路錯誤。
+- versionCode 8／versionName 0.2.6；登入流程與其餘功能
+  零改動；簽名沿用永帥 keystore＋V1+V2+V3。本機
+  `cargo check --target aarch64-linux-android` 先過再推。
+- CI run 41458156068（workflow #15），commit
+  `fc2a213f2c0c25e9b9908e315a355403739efaa2`，兩次讀數
+  一致、jobs 全綠（含 Build Rust core／Build APK）。
+- 驗包（artifact 13148242039，repo 級清單核對 ID 後
+  下載，大小 10,493,686 B 與清單一致）：
+  - apksigner：v2 ✔／v3 ✔（`--min-sdk-version 23` 下
+    v1 亦 ✔）；簽名者永帥證書 SHA-256 `a409afe8…c6acee` ✔
+  - package `com.yongshuai.ipaloader`、versionCode 8／
+    0.2.6 ✔；theme `@0x0103006b`（Theme.Holo）✔
+  - classes.dex 實查含 `org/rustls/platformverifier/
+    CertificateVerifier`（及 StatusCode／
+    VerificationResult）——Kotlin 元件確實進包 ✔
+  - `.so` 四個 JNI 符號齊全；新字串在包內：`platform
+    verifier init ok`、`getApplicationContext`
+    `()Landroid/content/Context;`、classify 的
+    `failed to build http client` ✔
+- **真機安裝注意**：與 0.2.4／0.2.5 同證書，可直接覆蓋
+  更新。待真機驗：按登入後 SRP 應真正發出——日誌應出現
+  `platform verifier init ok`，並走到 SRP 結果或 2FA
+  對話框；若再有 TLS 問題，日誌會留下完整錯誤鏈。
