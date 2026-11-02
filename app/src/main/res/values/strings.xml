@@ -26,6 +26,14 @@
     <string name="error_network">網路連線失敗，請檢查網路後再試一次。</string>
     <string name="error_anisette">Anisette 來源異常，請稍後再試。（%1$s）</string>
     <string name="error_unknown">登入失敗：%1$s</string>
+    <string name="error_panic">內部錯誤（已記錄日誌）</string>
+
+    <string name="view_log">日誌</string>
+    <string name="log_page_title">日誌</string>
+    <string name="copy_all">複製全部</string>
+    <string name="clear_log">清除</string>
+    <string name="log_copied">已複製</string>
+    <string name="log_empty">（尚無日誌）</string>
 
     <string name="tfa_title_device">信任裝置驗證</string>
     <string name="tfa_title_sms">簡訊驗證</string>

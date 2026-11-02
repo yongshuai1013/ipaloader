@@ -13,6 +13,13 @@ idevice = { version = "0.1.68", features = ["usbmuxd"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 plist = "1.8"
 rootcause = "0.12"
+# isideload 0.5.2 builds its HTTP stack on reqwest's rustls-no-provider
+# flavour, so the host process must install a rustls CryptoProvider
+# before the first client is constructed (see init_core in lib.rs).
+# Version/features align with the rustls 0.23 copy in Cargo.lock.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 
 [profile.release]
-panic = "abort"
+# unwind (not abort) so JNI entry points can catch_unwind a panic and
+# turn it into a logged ERR result instead of a process crash.
+panic = "unwind"

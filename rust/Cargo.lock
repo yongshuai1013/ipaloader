@@ -1494,6 +1494,7 @@ dependencies = [
  "jni 0.21.1",
  "plist",
  "rootcause",
+ "rustls",
  "tokio",
 ]
 

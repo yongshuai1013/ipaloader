@@ -13,11 +13,16 @@
 //! Result protocol for login/restore (newline separated, max 3 fields):
 //! `OK\n<email>\n<team name or empty>` or `ERR\n<CODE>\n<short message>`,
 //! plus the literal `NONE` from restore when no usable session exists.
+//! A caught panic is reported as `ERR\nPANIC\n<message>`.
 //!
-//! The password and 2FA codes are never logged.
+//! Diagnostics go to an append-only log at `<filesDir>/core/ipaloader.log`
+//! (login milestones, full error chains, panics). The password, 2FA codes
+//! and session/token contents are never logged.
 
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use isideload::anisette::remote_v3::RemoteV3AnisetteProvider;
 use isideload::anisette::AnisetteClientInfo;
@@ -52,9 +57,114 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-fn init_isideload() {
+/// Path of the shared diagnostic log, pinned by the first native call
+/// that knows the app files dir. The Kotlin side appends to the same
+/// file through its own helper (see AppLog.kt).
+static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+fn log_path_for(files_dir: &str) -> PathBuf {
+    PathBuf::from(files_dir).join("core").join("ipaloader.log")
+}
+
+/// Current time in UTC+8 (the user's timezone), formatted
+/// `YYYY-MM-DD HH:MM:SS`, without pulling in a date crate.
+fn timestamp() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+        + 8 * 3600;
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    // Civil-from-days conversion (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    if month <= 2 {
+        year += 1;
+    }
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year,
+        month,
+        day,
+        tod / 3600,
+        (tod % 3600) / 60,
+        tod % 60
+    )
+}
+
+/// Append one timestamped line to the diagnostic log. Best-effort: a
+/// logging failure must never take the app down.
+fn log_line(msg: &str) {
+    static LOG_LOCK: Mutex<()> = Mutex::new(());
+    let Some(path) = LOG_PATH.get() else {
+        return;
+    };
+    let _guard = LOG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let flat = msg.replace('\n', " ⏎ ");
+        let _ = writeln!(f, "[{}] [core] {}", timestamp(), flat);
+    }
+}
+
+macro_rules! logf {
+    ($($arg:tt)*) => {
+        log_line(&format!($($arg)*))
+    };
+}
+
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+fn init_core(files_dir: &str) {
+    let _ = LOG_PATH.set(log_path_for(files_dir));
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
+        // Record panics in the log even when they happen on a tokio
+        // worker thread and never reach a catch_unwind site.
+        std::panic::set_hook(Box::new(|info| {
+            let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            let loc = info
+                .location()
+                .map(|l| format!(" at {}:{}", l.file(), l.line()))
+                .unwrap_or_default();
+            log_line(&format!("PANIC: {}{}", msg, loc));
+        }));
+        // isideload 0.5.2 pins reqwest's rustls-no-provider flavour:
+        // the host must install a rustls CryptoProvider process-wide
+        // before the first HTTP client is built, otherwise client
+        // construction panics ("No provider set"). Do it here, ahead
+        // of every code path that builds a client. A duplicate install
+        // (already-present provider) errors and is ignored.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        log_line("core init: rustls CryptoProvider (aws-lc-rs) installed");
         let _ = isideload::init();
     });
 }
@@ -138,7 +248,13 @@ fn classify(report: &Report) -> (&'static str, String) {
         .trim()
         .to_string();
     if message.len() > 220 {
-        message.truncate(220);
+        // Char-boundary safe truncation: a plain truncate(220) panics
+        // when byte 220 falls inside a multi-byte character.
+        let mut end = 220;
+        while end > 0 && !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
     }
     let code = if chain.contains("no 2fa code provided")
         || chain.contains("no 2fa method selected")
@@ -196,6 +312,12 @@ impl TwoFactorBridge {
             .collect::<Vec<_>>()
             .join(",");
         let last_error = params.last_error.clone().unwrap_or_default();
+        logf!(
+            "2FA requested: kind={} numbers={} (last error present: {})",
+            kind,
+            numbers,
+            !last_error.is_empty()
+        );
 
         let mut env = self
             .vm
@@ -216,12 +338,22 @@ impl TwoFactorBridge {
         );
         if env.exception_check().unwrap_or(false) {
             let _ = env.exception_clear();
+            logf!("2FA bridge: Kotlin threw an exception, aborting");
             return Ok(TwoFactorCallbackResponse::Abort);
         }
         let result = result?;
         let j_str: JString = result.l()?.into();
         let reply: String = String::from(env.get_string(&j_str)?);
-        Ok(parse_two_factor_reply(&reply))
+        let response = parse_two_factor_reply(&reply);
+        // Log only the chosen action, never the submitted code itself.
+        match &response {
+            TwoFactorCallbackResponse::SubmitCode(_) => logf!("2FA reply: code submitted"),
+            TwoFactorCallbackResponse::SendSms(id) => logf!("2FA reply: send SMS (number id {})", id),
+            TwoFactorCallbackResponse::SendToDevices => logf!("2FA reply: send to trusted devices"),
+            TwoFactorCallbackResponse::ResendCode => logf!("2FA reply: resend code"),
+            TwoFactorCallbackResponse::Abort => logf!("2FA reply: aborted by user"),
+        }
+        Ok(response)
     }
 }
 
@@ -250,15 +382,27 @@ fn parse_two_factor_reply(reply: &str) -> TwoFactorCallbackResponse {
 async fn fetch_team_name(account: &mut AppleAccount) -> String {
     let mut session = match DeveloperSession::from_account(account).await {
         Ok(s) => s,
-        Err(_) => return String::new(),
+        Err(e) => {
+            let (_, m) = classify(&e);
+            logf!("team: developer session failed: {}", m);
+            return String::new();
+        }
     };
     match session.list_teams().await {
-        Ok(teams) => teams
-            .into_iter()
-            .next()
-            .and_then(|t| t.name)
-            .unwrap_or_default(),
-        Err(_) => String::new(),
+        Ok(teams) => {
+            let name = teams
+                .into_iter()
+                .next()
+                .and_then(|t| t.name)
+                .unwrap_or_default();
+            logf!("team: list ok (name present: {})", !name.is_empty());
+            name
+        }
+        Err(e) => {
+            let (_, m) = classify(&e);
+            logf!("team: list failed: {}", m);
+            String::new()
+        }
     }
 }
 
@@ -272,29 +416,63 @@ async fn do_login(
         let bridge = bridge.clone();
         async move { tokio::task::block_in_place(|| bridge.request(&params)) }
     };
-    let mut account = AppleAccountBuilder::new(&email)
-        .anisette_provider(anisette_provider(&files_dir)?)
+    logf!("login start: {}", email);
+    let provider = match anisette_provider(&files_dir) {
+        Ok(p) => {
+            logf!("anisette provider ready (remote v3)");
+            p
+        }
+        Err(e) => {
+            logf!("anisette provider failed: {:?}", e);
+            return Err(e);
+        }
+    };
+    logf!("login: SRP login begin");
+    let mut account = match AppleAccountBuilder::new(&email)
+        .anisette_provider(provider)
         .login(&password, callback)
-        .await?;
-    save_session(&files_dir, &account)?;
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            logf!("login failed: {:?}", e);
+            return Err(e);
+        }
+    };
+    logf!("login: SRP/2FA complete, saving session");
+    if let Err(e) = save_session(&files_dir, &account) {
+        logf!("session save failed: {:?}", e);
+        return Err(e);
+    }
+    logf!("session saved");
     let team = fetch_team_name(&mut account).await;
+    logf!("login ok");
     Ok(format!("OK\n{}\n{}", account.email, team.replace('\n', " ")))
 }
 
 async fn do_restore(files_dir: String) -> String {
+    logf!("restore start");
     let Some((email, spd)) = load_session(&files_dir) else {
+        logf!("restore: no saved session");
         return "NONE".to_string();
     };
+    logf!("restore: saved session found for {}", email);
     let mut account = match AppleAccountBuilder::new(&email)
         .anisette_provider(match anisette_provider(&files_dir) {
             Ok(p) => p,
-            Err(e) => return err_string(&e),
+            Err(e) => {
+                logf!("restore: anisette provider failed: {:?}", e);
+                return err_string(&e);
+            }
         })
         .build()
         .await
     {
         Ok(a) => a,
-        Err(e) => return err_string(&e),
+        Err(e) => {
+            logf!("restore: account build failed: {:?}", e);
+            return err_string(&e);
+        }
     };
     account.spd = Some(spd);
     // Validate the saved session with a real token exchange + team list;
@@ -302,9 +480,11 @@ async fn do_restore(files_dir: String) -> String {
     let mut session = match DeveloperSession::from_account(&mut account).await {
         Ok(s) => s,
         Err(e) => {
+            logf!("restore: developer session failed: {:?}", e);
             let chain = format!("{:?}", e).to_lowercase();
             if chain.contains("status code") || chain.contains("401") || chain.contains("403") {
                 clear_session(&files_dir);
+                logf!("restore: session rejected by Apple, cleared");
                 return "NONE".to_string();
             }
             return err_string(&e);
@@ -317,9 +497,13 @@ async fn do_restore(files_dir: String) -> String {
                 .next()
                 .and_then(|t| t.name)
                 .unwrap_or_default();
+            logf!("restore ok");
             format!("OK\n{}\n{}", email, team.replace('\n', " "))
         }
-        Err(e) => err_string(&e),
+        Err(e) => {
+            logf!("restore: list teams failed: {:?}", e);
+            err_string(&e)
+        }
     }
 }
 
@@ -357,23 +541,35 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeLogin(
     password: JString,
     files_dir: JString,
 ) -> jstring {
-    init_isideload();
     let email = jstring_to_rust(&mut env, &email);
     let password = jstring_to_rust(&mut env, &password);
     let files_dir = jstring_to_rust(&mut env, &files_dir);
-    let vm = match env.get_java_vm() {
-        Ok(vm) => vm,
-        Err(e) => return make_jstring(&mut env, &format!("ERR\nUNKNOWN\nJNI VM: {}", e)),
-    };
-    let callback = match env.new_global_ref(&this) {
-        Ok(r) => r,
-        Err(e) => return make_jstring(&mut env, &format!("ERR\nUNKNOWN\nJNI ref: {}", e)),
-    };
-    let bridge = Arc::new(TwoFactorBridge { vm, callback });
-    let result = runtime().block_on(do_login(email, password, files_dir, bridge));
+    init_core(&files_dir);
+    logf!("nativeLogin called");
+    // panic = "unwind" + catch_unwind: a panic anywhere in the login
+    // path becomes a logged ERR/PANIC result instead of a crash.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let vm = match env.get_java_vm() {
+            Ok(vm) => vm,
+            Err(e) => return format!("ERR\nUNKNOWN\nJNI VM: {}", e),
+        };
+        let callback = match env.new_global_ref(&this) {
+            Ok(r) => r,
+            Err(e) => return format!("ERR\nUNKNOWN\nJNI ref: {}", e),
+        };
+        let bridge = Arc::new(TwoFactorBridge { vm, callback });
+        match runtime().block_on(do_login(email, password, files_dir, bridge)) {
+            Ok(ok) => ok,
+            Err(e) => err_string(&e),
+        }
+    }));
     let text = match result {
-        Ok(ok) => ok,
-        Err(e) => err_string(&e),
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeLogin PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
     };
     make_jstring(&mut env, &text)
 }
@@ -385,9 +581,19 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeRestoreSe
     _this: JObject,
     files_dir: JString,
 ) -> jstring {
-    init_isideload();
     let files_dir = jstring_to_rust(&mut env, &files_dir);
-    let text = runtime().block_on(do_restore(files_dir));
+    init_core(&files_dir);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime().block_on(do_restore(files_dir))
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeRestoreSession PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
     make_jstring(&mut env, &text)
 }
 
@@ -399,6 +605,8 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeLogout(
     files_dir: JString,
 ) -> jboolean {
     let files_dir = jstring_to_rust(&mut env, &files_dir);
+    init_core(&files_dir);
     clear_session(&files_dir);
+    logf!("logout: saved session cleared");
     1
 }

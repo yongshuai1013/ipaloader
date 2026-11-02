@@ -2,6 +2,7 @@ package com.yongshuai.ipaloader
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.Intent
 import android.os.Bundle
 import android.text.InputType
 import android.view.View
@@ -31,6 +32,7 @@ class MainActivity : Activity() {
     private lateinit var emailField: EditText
     private lateinit var passwordField: EditText
     private lateinit var loginButton: Button
+    private lateinit var logButton: Button
     private lateinit var accountText: TextView
     private lateinit var teamText: TextView
     private lateinit var logoutButton: Button
@@ -76,6 +78,13 @@ class MainActivity : Activity() {
             addView(loginButton)
         }
 
+        logButton = Button(this).apply {
+            text = getString(R.string.view_log)
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, LogActivity::class.java))
+            }
+        }
+
         accountText = TextView(this).apply { textSize = 18f }
         teamText = TextView(this).apply { textSize = 16f }
         logoutButton = Button(this).apply {
@@ -93,9 +102,12 @@ class MainActivity : Activity() {
         layout.addView(versionText)
         layout.addView(statusText)
         layout.addView(progressBar)
+        layout.addView(logButton)
         layout.addView(loginForm)
         layout.addView(accountBox)
         setContentView(layout)
+
+        AppLog.write(filesDir, "App 啟動，開始恢復工作階段")
 
         setBusy(true, getString(R.string.status_checking))
         Thread {
@@ -142,6 +154,7 @@ class MainActivity : Activity() {
             statusText.text = getString(R.string.error_empty_fields)
             return
         }
+        AppLog.write(filesDir, "按下登入：$email")
         setBusy(true, getString(R.string.status_logging_in))
         Thread {
             val result = try {
@@ -157,6 +170,7 @@ class MainActivity : Activity() {
     }
 
     private fun startLogout() {
+        AppLog.write(filesDir, "按下登出")
         setBusy(true, getString(R.string.status_logging_out))
         Thread {
             try {
@@ -170,6 +184,11 @@ class MainActivity : Activity() {
 
     private fun onRestoreResult(result: String) {
         val parts = result.split("\n", limit = 3)
+        AppLog.write(
+            filesDir,
+            "工作階段恢復結果：${parts[0]}" +
+                if (parts[0] == "ERR") "（${parts.getOrElse(1) { "UNKNOWN" }}）" else ""
+        )
         when (parts[0]) {
             "OK" -> showLoggedIn(parts.getOrElse(1) { "" }, parts.getOrElse(2) { "" })
             "ERR" -> showLoginForm(
@@ -181,6 +200,14 @@ class MainActivity : Activity() {
 
     private fun onLoginResult(result: String) {
         val parts = result.split("\n", limit = 3)
+        AppLog.write(
+            filesDir,
+            if (parts[0] == "OK") {
+                "登入結果：OK"
+            } else {
+                "登入結果：ERR（${parts.getOrElse(1) { "UNKNOWN" }}）"
+            }
+        )
         when (parts[0]) {
             "OK" -> showLoggedIn(parts.getOrElse(1) { "" }, parts.getOrElse(2) { "" })
             else -> {
@@ -193,6 +220,7 @@ class MainActivity : Activity() {
 
     private fun friendlyError(code: String, message: String): String {
         return when (code) {
+            "PANIC" -> getString(R.string.error_panic)
             "BAD_CREDENTIALS" -> getString(R.string.error_bad_credentials)
             "CANCELLED" -> getString(R.string.error_cancelled)
             "NETWORK" -> getString(R.string.error_network)
@@ -227,8 +255,19 @@ class MainActivity : Activity() {
                 latch.countDown()
             }
         }
+        AppLog.write(filesDir, "2FA 對話框顯示：kind=$kind")
         latch.await(300, TimeUnit.SECONDS)
-        return result.get()
+        val answer = result.get()
+        // Log only the chosen action, never the submitted code.
+        val action = when {
+            answer.startsWith("code:") -> "提交驗證碼"
+            answer.startsWith("sms:") -> "選擇簡訊號碼"
+            answer == "resend" -> "重新發送"
+            answer == "devices" -> "傳送到信任裝置"
+            else -> "取消"
+        }
+        AppLog.write(filesDir, "2FA 對話框結果：$action")
+        return answer
     }
 
     private fun showTwoFactorDialog(
