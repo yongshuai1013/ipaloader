@@ -142,4 +142,23 @@ provider 的 `get_client_info()`（或 override）。也就是：
 - `.gitignore` 已加 `*.jks`／`*.keystore`／`keystore.properties`／
   `release-keystore*` 防誤推。
 - versionCode 4 / versionName 0.2.2，功能未動。
-- CI 與驗包結果：見下方「驗證」段（出貨前補）。
+- CI run 41447718538（2026-11-02 12:48:39Z 觸發，commit
+  `8e5c284910dbd764c867673e21270e1fc2081dd4`）：success（兩次
+  讀數一致、jobs 全 12 步驟綠、artifact 清單穩定；run 作用域
+  端點一度給出假 artifact ID，改以 repo 級清單按 run 號核對
+  為準）。artifact `13143625737`（ipaloader-apk，7,013,858 B）。
+- 驗包（apksigner＋aapt2 實查 release 包）：
+  - `apksigner verify --print-certs`：簽名者 DN
+    `CN=ipaloader, O=ipaloader release`，SHA-256 digest
+    `3780d3683d619623d9781fa7b6dca0187e1bea0680e5136ad79ae4fad90ab7f6`
+    ＝keystore 證書指紋 ✔（非 Android Debug）；debug 包仍為
+    Android Debug 簽名（行為不變）。
+  - package `com.yongshuai.ipaloader`、versionCode 4、
+    versionName 0.2.2、minSdk 26、targetSdk 34 ✔
+  - application theme = `@0x0103006b` ＝ Theme.Holo（深色）✔
+  - `lib/arm64-v8a/libipaloader_core.so` 在包內，四個
+    `Java_com_yongshuai_ipaloader_MainActivity_` 符號齊全 ✔
+- **真機安裝注意**：這次要裝 artifact 裡的
+  `app-release.apk`（已簽名、可裝）；簽名與先前 debug 版不同，
+  裝前先卸除舊版 `com.yongshuai.ipaloader`（0.2.1）。之後的
+  版本皆同一把金鑰，可直接覆蓋更新。
