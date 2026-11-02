@@ -8,6 +8,7 @@
 
     <string name="email_hint">Apple ID（電子郵件）</string>
     <string name="password_hint">密碼</string>
+    <string name="remember_account">記住帳號</string>
 
     <string name="status_checking">正在檢查登入狀態…</string>
     <string name="status_please_login">請登入 Apple ID</string>

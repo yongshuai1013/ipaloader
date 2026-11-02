@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.text.InputType
 import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
@@ -31,6 +32,7 @@ class MainActivity : Activity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var emailField: EditText
     private lateinit var passwordField: EditText
+    private lateinit var rememberCheck: CheckBox
     private lateinit var loginButton: Button
     private lateinit var logButton: Button
     private lateinit var accountText: TextView
@@ -67,6 +69,10 @@ class MainActivity : Activity() {
             hint = getString(R.string.password_hint)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         }
+        rememberCheck = CheckBox(this).apply {
+            text = getString(R.string.remember_account)
+            isChecked = true
+        }
         loginButton = Button(this).apply {
             text = getString(R.string.login)
             setOnClickListener { startLogin() }
@@ -75,6 +81,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             addView(emailField)
             addView(passwordField)
+            addView(rememberCheck)
             addView(loginButton)
         }
 
@@ -107,6 +114,8 @@ class MainActivity : Activity() {
         layout.addView(accountBox)
         setContentView(layout)
 
+        prefillSavedCredentials()
+
         AppLog.write(filesDir, "App 啟動，開始恢復工作階段")
 
         setBusy(true, getString(R.string.status_checking))
@@ -126,6 +135,7 @@ class MainActivity : Activity() {
         loginButton.isEnabled = !busy
         emailField.isEnabled = !busy
         passwordField.isEnabled = !busy
+        rememberCheck.isEnabled = !busy
         logoutButton.isEnabled = !busy
     }
 
@@ -141,10 +151,19 @@ class MainActivity : Activity() {
         setBusy(false, getString(R.string.status_logged_in))
     }
 
-    private fun showLoginForm(status: String) {
+    private fun showLoginForm(status: String, prefill: Boolean = true) {
         accountBox.visibility = View.GONE
         loginForm.visibility = View.VISIBLE
+        if (prefill) prefillSavedCredentials()
         setBusy(false, status)
+    }
+
+    /** Fills the login form from [CredentialStore] when a pair is saved. */
+    private fun prefillSavedCredentials() {
+        val saved = CredentialStore.load(this) ?: return
+        emailField.setText(saved.first)
+        passwordField.setText(saved.second)
+        rememberCheck.isChecked = true
     }
 
     private fun startLogin() {
@@ -164,7 +183,7 @@ class MainActivity : Activity() {
             }
             runOnUiThread {
                 passwordField.text.clear()
-                onLoginResult(result)
+                onLoginResult(result, email, password)
             }
         }.start()
     }
@@ -198,7 +217,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun onLoginResult(result: String) {
+    private fun onLoginResult(result: String, email: String, password: String) {
         val parts = result.split("\n", limit = 3)
         AppLog.write(
             filesDir,
@@ -209,11 +228,24 @@ class MainActivity : Activity() {
             }
         )
         when (parts[0]) {
-            "OK" -> showLoggedIn(parts.getOrElse(1) { "" }, parts.getOrElse(2) { "" })
+            "OK" -> {
+                // Remember-me: only a successful login touches the
+                // saved pair. Checked -> save/refresh it; unchecked ->
+                // forget any previously saved pair. The values
+                // themselves are never logged.
+                if (rememberCheck.isChecked) {
+                    CredentialStore.save(this, email, password)
+                    AppLog.write(filesDir, "已記住帳號（密碼加密保存）")
+                } else {
+                    CredentialStore.clear(this)
+                    AppLog.write(filesDir, "未勾選記住帳號，已清除先前保存")
+                }
+                showLoggedIn(parts.getOrElse(1) { "" }, parts.getOrElse(2) { "" })
+            }
             else -> {
                 val code = parts.getOrElse(1) { "UNKNOWN" }
                 val message = parts.getOrElse(2) { "" }
-                showLoginForm(friendlyError(code, message))
+                showLoginForm(friendlyError(code, message), prefill = false)
             }
         }
     }
