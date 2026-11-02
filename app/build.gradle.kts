@@ -11,8 +11,8 @@ android {
         applicationId = "com.yongshuai.ipaloader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "0.2.5"
+        versionCode = 8
+        versionName = "0.2.6"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -56,4 +56,15 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    // Kotlin half of rustls-platform-verifier: it provides
+    // org.rustls.platformverifier.CertificateVerifier, which the
+    // Rust verifier calls through JNI to check certificate chains
+    // with the Android platform verifier. Without it the first
+    // platform-verified TLS handshake fails. The version must match
+    // the rustls-platform-verifier-android crate version pinned in
+    // rust/Cargo.lock; the maven repo lives in settings.gradle.kts.
+    implementation("org.rustls:rustls-platform-verifier:0.2.0")
 }

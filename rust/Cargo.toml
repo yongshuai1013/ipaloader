@@ -18,6 +18,26 @@ rootcause = "0.12"
 # before the first client is constructed (see init_core in lib.rs).
 # Version/features align with the rustls 0.23 copy in Cargo.lock.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+# rustls-platform-verifier performs TLS verification through the
+# Android platform (via a small Kotlin component in the APK). On
+# Android the host must initialize it once with the application
+# Context before the first handshake, or verification panics with
+# "Expect rustls-platform-verifier to be initialized" — see
+# ensure_rpv_init in lib.rs. Its init API is typed against jni 0.22
+# (the copy isideload already uses), while this crate's own JNI
+# surface is jni 0.21, so jni 0.22 is pulled in under a rename purely
+# to bridge the raw pointers at the init call site.
+rustls-platform-verifier = "=0.7.1"
+jni22 = { package = "jni", version = "=0.22.4" }
+
+# Vendored isideload 0.5.2 (pristine crates.io copy in vendor/) with
+# exactly one patched line: GrandSlam's reqwest client now uses
+# tls_certs_only([Apple root]) instead of add_root_certificate, whose
+# platform-verifier code path cannot build a client on Android at all
+# (see the comment at the patch site in
+# vendor/isideload/src/auth/grandslam.rs).
+[patch.crates-io]
+isideload = { path = "vendor/isideload" }
 
 [profile.release]
 # unwind (not abort) so JNI entry points can catch_unwind a panic and

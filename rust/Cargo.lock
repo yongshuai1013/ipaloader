@@ -1492,9 +1492,11 @@ dependencies = [
  "idevice",
  "isideload",
  "jni 0.21.1",
+ "jni 0.22.4",
  "plist",
  "rootcause",
  "rustls",
+ "rustls-platform-verifier",
  "tokio",
 ]
 
@@ -1507,8 +1509,6 @@ checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 [[package]]
 name = "isideload"
 version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cab6348bffd8f32c9358b80c8723bc1da45ad97b0c1f30a1533ade22d4d9496"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm",

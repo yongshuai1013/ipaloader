@@ -21,6 +21,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -137,8 +138,84 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// One-time rustls-platform-verifier Android initialization. The
+/// verifier talks to the JVM through the JavaVM + application Context
+/// stored by `android::init_with_env`; without it, the first TLS
+/// handshake that relies on the platform verifier (the anisette
+/// fetch, the developer-portal calls) panics with "Expect
+/// rustls-platform-verifier to be initialized". Attempted from every
+/// JNI entry point — they all receive the Activity — until it has
+/// succeeded once.
+static RPV_INIT_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Init result waiting to be written to the log. `nativeVersion`
+/// runs at app startup before any entry point that knows the files
+/// dir (and therefore the log path); `init_core` flushes this.
+static RPV_INIT_MSG: Mutex<Option<String>> = Mutex::new(None);
+
+fn ensure_rpv_init(env: &mut JNIEnv, this: &JObject) {
+    if RPV_INIT_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let msg = match try_rpv_init(env, this) {
+        Ok(()) => {
+            RPV_INIT_DONE.store(true, Ordering::Relaxed);
+            "platform verifier init ok".to_string()
+        }
+        Err(e) => format!("platform verifier init FAILED: {}", e),
+    };
+    if LOG_PATH.get().is_some() {
+        log_line(&msg);
+    } else if let Ok(mut slot) = RPV_INIT_MSG.lock() {
+        *slot = Some(msg);
+    }
+}
+
+fn try_rpv_init(env: &mut JNIEnv, this: &JObject) -> Result<(), String> {
+    // The application Context, not the Activity itself: the verifier
+    // keeps a process-lifetime global reference to what it is given.
+    let ctx = env
+        .call_method(
+            this,
+            "getApplicationContext",
+            "()Landroid/content/Context;",
+            &[],
+        )
+        .map_err(|e| format!("getApplicationContext: {}", e))?;
+    let ctx_obj = ctx
+        .l()
+        .map_err(|e| format!("getApplicationContext result: {}", e))?;
+    let raw_ctx = ctx_obj.into_raw();
+    // Bridge to the jni 0.22 types rustls-platform-verifier 0.7 is
+    // typed against; both jni copies wrap the same C pointers, and
+    // this native call's stack frame owns them for the duration.
+    let mut inner: Option<Result<(), String>> = None;
+    let mut unowned =
+        unsafe { jni22::EnvUnowned::from_raw(env.get_raw() as *mut jni22::sys::JNIEnv) };
+    let _outcome = unowned.with_env(|env22| {
+        let ctx22 =
+            unsafe { jni22::objects::JObject::from_raw(env22, raw_ctx as jni22::sys::jobject) };
+        inner = Some(
+            rustls_platform_verifier::android::init_with_env(env22, ctx22)
+                .map_err(|e| format!("{}", e)),
+        );
+        Ok::<(), jni22::errors::Error>(())
+    });
+    match inner {
+        Some(r) => r,
+        None => Err("jni bridge produced no result".to_string()),
+    }
+}
+
 fn init_core(files_dir: &str) {
     let _ = LOG_PATH.set(log_path_for(files_dir));
+    // Flush a platform-verifier init result that happened before the
+    // log path was known (see ensure_rpv_init).
+    if let Ok(mut slot) = RPV_INIT_MSG.lock() {
+        if let Some(msg) = slot.take() {
+            log_line(&msg);
+        }
+    }
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         // Record panics in the log even when they happen on a tokio
@@ -256,7 +333,14 @@ fn classify(report: &Report) -> (&'static str, String) {
         }
         message.truncate(end);
     }
-    let code = if chain.contains("no 2fa code provided")
+    let code = if chain.contains("failed to build http client") {
+        // Client-construction failures (TLS/verifier setup in the
+        // host) are not connectivity problems. Keep them out of the
+        // NETWORK bucket so the UI shows the raw message instead of
+        // a misleading "network error" (0.2.5's GrandSlam client
+        // build failure was misreported exactly that way).
+        "UNKNOWN"
+    } else if chain.contains("no 2fa code provided")
         || chain.contains("no 2fa method selected")
     {
         "CANCELLED"
@@ -524,8 +608,12 @@ fn make_jstring(env: &mut JNIEnv, text: &str) -> jstring {
 #[no_mangle]
 pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeVersion(
     mut env: JNIEnv,
-    _this: JObject,
+    this: JObject,
 ) -> jstring {
+    // Earliest entry point at app startup: initialize the platform
+    // verifier here (result is stashed and flushed to the log by the
+    // first files-dir entry point).
+    ensure_rpv_init(&mut env, &this);
     let _addr = idevice::usbmuxd::UsbmuxdAddr::from_env_var();
     make_jstring(&mut env, "rust core ok: isideload 0.5.2 / idevice 0.1.68")
 }
@@ -545,6 +633,7 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeLogin(
     let password = jstring_to_rust(&mut env, &password);
     let files_dir = jstring_to_rust(&mut env, &files_dir);
     init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
     logf!("nativeLogin called");
     // panic = "unwind" + catch_unwind: a panic anywhere in the login
     // path becomes a logged ERR/PANIC result instead of a crash.
@@ -578,11 +667,12 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeLogin(
 #[no_mangle]
 pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeRestoreSession(
     mut env: JNIEnv,
-    _this: JObject,
+    this: JObject,
     files_dir: JString,
 ) -> jstring {
     let files_dir = jstring_to_rust(&mut env, &files_dir);
     init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         runtime().block_on(do_restore(files_dir))
     }));
@@ -601,11 +691,12 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeRestoreSe
 #[no_mangle]
 pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeLogout(
     mut env: JNIEnv,
-    _this: JObject,
+    this: JObject,
     files_dir: JString,
 ) -> jboolean {
     let files_dir = jstring_to_rust(&mut env, &files_dir);
     init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
     clear_session(&files_dir);
     logf!("logout: saved session cleared");
     1
