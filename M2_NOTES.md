@@ -371,3 +371,36 @@ verifier 0.7.1／isideload 0.5.2 三方原始碼後，確認是三層：
 - **真機安裝注意**：與 0.2.4 起同證書，可直接覆蓋更新。
   待真機驗：按登入後 provisioning WS 應連通（不再出現
   404 的 provisioning 錯誤），走到 SRP 結果或 2FA 對話框。
+
+## 0.2.8 記住帳號＋密碼（2026-11-02）
+
+- **新功能（用戶拍板：帳密都記、密碼加密存）**：登入頁加
+  Holo CheckBox「記住帳號」（預設勾選），手寫 helper
+  `CredentialStore.kt`、無新依賴：
+  - 登入成功＋有勾選 → 保存；未勾選登入成功 → 清除先前
+    保存。登出不清（用途是 session 失效後快速重登）。
+  - email 存 SharedPreferences（明文）；密碼以 Android
+    Keystore AES/GCM/NoPadding 金鑰（alias
+    `ipaloader_cred_key`）加密，僅密文＋IV（Base64）落盤。
+  - 啟動／回到登入頁自動帶入並呈勾選；解密失敗（金鑰
+    失效等）→ 清除保存值、空白啟動不閃退。密碼絕不
+    明文落盤、絕不寫日誌（沿用紅線）。
+- versionCode 10／versionName 0.2.8；Rust 側零改動；
+  簽名沿用永帥 keystore＋V1+V2+V3。
+- CI run 41462556449（workflow #19），commit
+  `1a4d17af19939c323c31e19653fcf72c6a38090e`，兩次讀數
+  一致、jobs 全步驟綠。
+- 驗包（artifact 13149597343，repo 級清單按 run 號
+  核對 ID 後下載，大小 10,496,560 B 與清單一致）：
+  - apksigner：v2 ✔／v3 ✔（`--min-sdk-version 23` 下
+    v1 亦 ✔）；簽名者永帥證書 SHA-256
+    `a409afe8…c6acee` ✔
+  - package `com.yongshuai.ipaloader`、versionCode 10／
+    0.2.8、minSdk 26／targetSdk 34 ✔；theme
+    `@0x0103006b`（Theme.Holo）✔
+  - classes.dex 字串實查含 `ipaloader_cred_key`、
+    `saved_credentials`、`remember_account` ✔
+- **真機安裝注意**：與 0.2.4 起同證書，可直接覆蓋
+  更新。待真機驗：登入成功 → 劃掉重開 → 帳密應自動
+  帶入、CheckBox 呈勾選；取消勾選再登入成功 → 重開
+  應空白。
