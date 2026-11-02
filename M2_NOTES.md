@@ -57,4 +57,36 @@ provider 的 `get_client_info()`（或 override）。也就是：
 
 ## CI／驗包結果
 
-（待 CI 完成後補）
+- 本機 `cargo check --target aarch64-linux-android` 先過（零錯誤）。
+- CI run 41439701189（2026-11-02 11:48:34Z 觸發，commit
+  `d192fd22694c78233916b960cc197ce506f233cf`）：success（兩次獨立
+  讀數一致）。artifact `13137684806`（ipaloader-apk，7.0 MB）。
+- 驗包（aapt2 實查 debug 與 release 兩包，一致）：
+  - package `app.ipaloader`、versionCode 2、versionName 0.2.0
+  - minSdkVersion 26、targetSdkVersion 34
+  - application theme = `@0x0103006b` ＝ Theme.Holo（深色）✔
+  - uses-permission `android.permission.INTERNET` ✔
+  - launchable activity = `app.ipaloader.MainActivity` ✔
+  - `lib/arm64-v8a/libipaloader_core.so` 在包內，匯出符號含
+    `Java_app_ipaloader_MainActivity_nativeLogin`、
+    `nativeRestoreSession`、`nativeLogout`、`nativeVersion` ✔
+- 簽名狀態同 M1：release 未簽名不可裝；真機測試請裝 artifact 裡的
+  `app-debug.apk`。
+
+## 真機測試步驟（M2 驗收）
+
+1. 下載 CI run 41439701189 的 artifact，裝 `app-debug.apk`（覆蓋
+   M1 的 debug 版可直接升級，versionCode 2）。
+2. 開 App：應先顯示「正在檢查登入狀態…」，然後回到登入表單
+   （第一次還沒有 session）。
+3. 輸入真 Apple ID＋密碼按「登入」：若帳號有 2FA，先到信任裝置
+   會收到驗證碼，App 應跳出「信任裝置驗證」對話框；輸入六位碼
+   提交。想改走簡訊：按對話框裡「以簡訊傳送到 ••XX」換號碼，
+   之後對話框會變簡訊模式再輸入簡訊碼。
+4. 登入成功後主畫面應顯示帳號與團隊名稱（個人團隊會顯示你的
+   名字），並有「登出」鈕。
+5. 把 App 從最近清單劃掉重開：應直接回到已登入畫面（session
+   還原，中間會顯示檢查狀態），不必再輸入密碼。
+6. 按「登出」後重開 App：應回到登入表單。
+7. 錯誤路徑：故意打錯一次密碼，應顯示「Apple ID 或密碼不正確」
+   而不是整坨英文錯誤。
