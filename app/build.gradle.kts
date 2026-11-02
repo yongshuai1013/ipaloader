@@ -11,8 +11,8 @@ android {
         applicationId = "com.yongshuai.ipaloader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.2.2"
+        versionCode = 5
+        versionName = "0.2.3"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -20,6 +20,12 @@ android {
 
     signingConfigs {
         create("release") {
+            // Sign with all three schemes: v2-only APKs get a Play
+            // Protect risk prompt on the user's device, while v2+v3
+            // (produced by re-signing the same APK) installs cleanly.
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
             // Credentials come from CI secrets via environment variables;
             // nothing keystore-related is ever committed to this repo.
             val ksPath = System.getenv("KEYSTORE_PATH")
