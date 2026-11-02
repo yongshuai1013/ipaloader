@@ -107,4 +107,20 @@ provider 的 `get_client_info()`（或 override）。也就是：
   - versionCode 3 / versionName 0.2.1
   - 未接正式簽名金鑰（與包名分開試，簽名維持 CI debug 簽名）
 - 本機 `cargo check --target aarch64-linux-android` 先過（零錯誤）。
-- CI／驗包結果：待補（見下一筆提交）。
+- CI run 41445500231（2026-11-02 12:32:11Z 觸發，commit
+  `18290f4a8863115ec6f0665c106a0e6812ae5c72`）：success（jobs 全
+  步驟綠；run 層級曾出現代理假狀態——先報 success 又閃回
+  in_progress，以 jobs 明細＋artifact 清單穩定為準）。artifact
+  `13142647089`（ipaloader-apk，7,012,488 B）。
+- 驗包（aapt2 實查 debug 與 release 兩包，一致）：
+  - package `com.yongshuai.ipaloader`、versionCode 3、
+    versionName 0.2.1、minSdkVersion 26、targetSdkVersion 34
+  - application theme = `@0x0103006b` ＝ Theme.Holo（深色）✔
+  - launchable activity = `com.yongshuai.ipaloader.MainActivity` ✔
+  - `lib/arm64-v8a/libipaloader_core.so` 在包內，llvm-nm 實查
+    匯出符號為 `Java_com_yongshuai_ipaloader_MainActivity_` 前綴
+    四個（nativeVersion／nativeLogin／nativeRestoreSession／
+    nativeLogout），舊前綴 0 個 ✔
+- 簽名狀態同 M2：release 未簽名不可裝；真機測試請裝 artifact
+  裡的 `app-debug.apk`。注意：換包名後在 Android 上是另一個
+  App，舊 `app.ipaloader` 版可卸除。
