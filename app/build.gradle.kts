@@ -4,15 +4,15 @@ plugins {
 }
 
 android {
-    namespace = "app.ipaloader"
+    namespace = "com.yongshuai.ipaloader"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "app.ipaloader"
+        applicationId = "com.yongshuai.ipaloader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.1"
         ndk {
             abiFilters += "arm64-v8a"
         }

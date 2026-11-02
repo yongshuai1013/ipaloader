@@ -90,3 +90,21 @@ provider 的 `get_client_info()`（或 override）。也就是：
 6. 按「登出」後重開 App：應回到登入表單。
 7. 錯誤路徑：故意打錯一次密碼，應顯示「Apple ID 或密碼不正確」
    而不是整坨英文錯誤。
+
+## 包名變更實驗（2026-11-02，versionName 0.2.1）
+
+- 動機：M2 的 debug APK 在真機安裝時被 Google Play Protect 以
+  「已封鎖有害的應用程式」擋下；用戶要單一變量驗證封鎖是否與
+  包名有關。
+- 變更（僅身份，功能內容與 M2 完全相同）：
+  - applicationId／namespace：`app.ipaloader` →
+    `com.yongshuai.ipaloader`
+  - Kotlin package 與原始碼目錄同步改為
+    `com/yongshuai/ipaloader/`
+  - Rust JNI 符號前綴改為
+    `Java_com_yongshuai_ipaloader_MainActivity_*`（nativeVersion／
+    nativeLogin／nativeRestoreSession／nativeLogout 四個）
+  - versionCode 3 / versionName 0.2.1
+  - 未接正式簽名金鑰（與包名分開試，簽名維持 CI debug 簽名）
+- 本機 `cargo check --target aarch64-linux-android` 先過（零錯誤）。
+- CI／驗包結果：待補（見下一筆提交）。

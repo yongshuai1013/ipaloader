@@ -1,4 +1,4 @@
-package app.ipaloader
+package com.yongshuai.ipaloader
 
 import android.app.Activity
 import android.app.AlertDialog

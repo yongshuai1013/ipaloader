@@ -1,6 +1,6 @@
 //! ipaloader Rust core (M2: real Apple ID login).
 //!
-//! JNI surface (all on `app.ipaloader.MainActivity`):
+//! JNI surface (all on `com.yongshuai.ipaloader.MainActivity`):
 //! - `nativeVersion()` — M1 placeholder, proves the channel works.
 //! - `nativeLogin(email, password, filesDir)` — GrandSlam SRP login with
 //!   2FA bridged back to Kotlin through `MainActivity.onTwoFactorNeeded`.
@@ -336,9 +336,9 @@ fn make_jstring(env: &mut JNIEnv, text: &str) -> jstring {
         .into_raw()
 }
 
-/// `external fun nativeVersion(): String` in `app.ipaloader.MainActivity`.
+/// `external fun nativeVersion(): String` in `com.yongshuai.ipaloader.MainActivity`.
 #[no_mangle]
-pub extern "system" fn Java_app_ipaloader_MainActivity_nativeVersion(
+pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeVersion(
     mut env: JNIEnv,
     _this: JObject,
 ) -> jstring {
@@ -350,7 +350,7 @@ pub extern "system" fn Java_app_ipaloader_MainActivity_nativeVersion(
 /// Blocking: run on a background thread. `this` must implement
 /// `onTwoFactorNeeded(String, String, String): String`.
 #[no_mangle]
-pub extern "system" fn Java_app_ipaloader_MainActivity_nativeLogin(
+pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeLogin(
     mut env: JNIEnv,
     this: JObject,
     email: JString,
@@ -380,7 +380,7 @@ pub extern "system" fn Java_app_ipaloader_MainActivity_nativeLogin(
 
 /// `external fun nativeRestoreSession(filesDir): String`.
 #[no_mangle]
-pub extern "system" fn Java_app_ipaloader_MainActivity_nativeRestoreSession(
+pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeRestoreSession(
     mut env: JNIEnv,
     _this: JObject,
     files_dir: JString,
@@ -393,7 +393,7 @@ pub extern "system" fn Java_app_ipaloader_MainActivity_nativeRestoreSession(
 
 /// `external fun nativeLogout(filesDir): Boolean`.
 #[no_mangle]
-pub extern "system" fn Java_app_ipaloader_MainActivity_nativeLogout(
+pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeLogout(
     mut env: JNIEnv,
     _this: JObject,
     files_dir: JString,
