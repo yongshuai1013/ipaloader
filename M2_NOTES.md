@@ -194,3 +194,23 @@ provider 的 `get_client_info()`（或 override）。也就是：
 - **真機安裝注意**：裝 artifact 裡的 `app-release.apk`；
   與 0.2.2 同一把固定金鑰，可直接覆蓋更新免卸除。待真機
   驗：Play Protect 風險提示是否消失。
+
+## 換用永帥自備簽名證書（v0.2.4，2026-11-02）
+
+- 背景：0.2.3（Pax 臨時金鑰＋V1+V2+V3）真機仍跳 Play Protect
+  提示；永帥決定自己生成簽名證書長期保管，取代 Pax 的臨時金鑰。
+- 新證書：DN `CN=yongshuai, OU=yongshuai, O=yongshuai, L=, ST=TW, C=TW`，
+  有效期 2026-11-02 至 2076-10-20，SHA-256 指紋
+  `A4:09:AF:E8:10:28:28:F8:50:E4:4D:BA:2A:24:12:3B:08:EB:E5:03:9C:FF:10:4C:25:4A:57:67:25:C6:AC:EE`。
+- GitHub Secrets 四項已換新值；CI／Gradle 簽名機制與 V1+V2+V3
+  設定不動。本機備份已換至目標資料夾，舊金鑰備份刪除退役。
+- CI run 41452697769（workflow #11），commit
+  `4be09441b4732c9991f1dd1d010d2a02e8c03ae0`，全綠（12 步驟）。
+- 驗包（artifact 13146216152 下載實查）：
+  - apksigner：v2 ✔／v3 ✔；簽名者 DN 與指紋與新證書一致 ✔
+  - package `com.yongshuai.ipaloader`、versionCode 6／0.2.4、
+    minSdk 26／targetSdk 34 ✔；theme `@0x0103006b`（Theme.Holo）✔
+  - `libipaloader_core.so` 在包內，JNI 符號字串齊全 ✔
+- **真機安裝注意**：證書已換，裝 0.2.4 前須先卸除舊版
+  （Pax 金鑰簽的 0.2.2／0.2.3 或 MT 重簽版），之後同證書版本
+  可直接覆蓋更新。待真機驗：Play Protect 提示與登入實測。
