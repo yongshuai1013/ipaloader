@@ -5,3 +5,7 @@ local.properties
 app/build/
 build/
 rust/target/
+*.jks
+*.keystore
+keystore.properties
+release-keystore*

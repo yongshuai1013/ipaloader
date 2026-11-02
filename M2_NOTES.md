@@ -124,3 +124,22 @@ provider 的 `get_client_info()`（或 override）。也就是：
 - 簽名狀態同 M2：release 未簽名不可裝；真機測試請裝 artifact
   裡的 `app-debug.apk`。注意：換包名後在 Android 上是另一個
   App，舊 `app.ipaloader` 版可卸除。
+
+## 固定正式簽名（v0.2.2，2026-11-02）
+
+- 背景：包名換成 `com.yongshuai.ipaloader` 後 Play Protect 仍擋，
+  下一個單一變量＝簽名。原先延後的固定金鑰待辦一併在此完成。
+- 已建固定 release keystore：alias `ipaloader`、RSA 2048、
+  validity 10000 天。證書 SHA-256 指紋（公開資訊）：
+  `37:80:D3:68:3D:61:96:23:D9:78:1F:A7:B6:DC:A0:18:7E:1B:EA:06:80:E5:13:6A:D7:9A:E4:FA:D9:0A:B7:F6`
+- 金鑰與密碼：**不在本倉庫**。已上 GitHub Secrets
+  （KEYSTORE_BASE64／KEYSTORE_PASSWORD／KEY_ALIAS／KEY_PASSWORD），
+  本地備份在目標工作區 hidden_files（權限 600）。筆記與倉庫只記指紋。
+- CI／Gradle：workflow 從 Secrets 還原 keystore 至 runner 臨時
+  目錄並以 `KEYSTORE_PATH` 環境變數傳給 Gradle
+  `signingConfigs.release`；本機無此環境變數時 release 維持未
+  簽名（行為不變）；debug 構建維持 CI 臨時 debug 金鑰。
+- `.gitignore` 已加 `*.jks`／`*.keystore`／`keystore.properties`／
+  `release-keystore*` 防誤推。
+- versionCode 4 / versionName 0.2.2，功能未動。
+- CI 與驗包結果：見下方「驗證」段（出貨前補）。
