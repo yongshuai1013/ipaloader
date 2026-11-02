@@ -162,3 +162,35 @@ provider 的 `get_client_info()`（或 override）。也就是：
   `app-release.apk`（已簽名、可裝）；簽名與先前 debug 版不同，
   裝前先卸除舊版 `com.yongshuai.ipaloader`（0.2.1）。之後的
   版本皆同一把金鑰，可直接覆蓋更新。
+
+## 簽名方案 V1+V2+V3（v0.2.3，2026-11-02）
+
+- 起因（真機實驗）：v2-only 的 0.2.2 release 安裝時跳 Play
+  Protect 風險提示；同一包經 MT 管理器重簽成 V2+V3 後不跳、
+  且成功安裝。用戶指示在自家固定金鑰下複製同一簽名條件。
+- 改動：`app/build.gradle.kts` 的 `signingConfigs.release`
+  明確加 `enableV1Signing = true`、`enableV2Signing = true`、
+  `enableV3Signing = true`（Kotlin DSL 屬性名）；versionCode
+  5 / versionName 0.2.3，功能零改動、debug 簽名不動。
+- CI run 41450202356（2026-11-02 13:07:06Z 觸發，commit
+  `27d21cd123f62ad17023d5cb22ec9a5e5c48c94f`）：success（兩次
+  讀數一致、jobs 12 步驟全綠）。artifact `13144563091`
+  （ipaloader-apk，7,017,344 B；ID 經 repo 級清單核對）。
+- 驗包（apksigner＋aapt2 實查 release 包）：
+  - 預設 `apksigner verify --verbose`：v1 false／v2 true／
+    v3 true；但 APK 內含 `META-INF/MANIFEST.MF`＋`CERT.SF`＋
+    `CERT.RSA`（0.2.2 時無此三檔），v1 簽名本體確實存在；
+    加 `--min-sdk-version 23` 重驗：**v1／v2／v3 全 true**。
+    預設模式的 v1 false 是 apksigner 對 minSdk ≥ 24 跳過
+    JAR 簽名驗證的既定行為，非簽名缺失。
+  - 簽名者同固定證書：DN `CN=ipaloader, O=ipaloader
+    release`，SHA-256 `3780d368…fad90ab7f6` ✔
+  - package `com.yongshuai.ipaloader`、versionCode 5、
+    versionName 0.2.3、minSdk 26、targetSdk 34 ✔
+  - application theme = `@0x0103006b` ＝ Theme.Holo ✔；
+    `libipaloader_core.so` 在包內，四個
+    `Java_com_yongshuai_ipaloader_MainActivity_` 符號齊全 ✔
+  - debug 包維持 v2-only＋CI 臨時 debug 金鑰（未動）✔
+- **真機安裝注意**：裝 artifact 裡的 `app-release.apk`；
+  與 0.2.2 同一把固定金鑰，可直接覆蓋更新免卸除。待真機
+  驗：Play Protect 風險提示是否消失。
