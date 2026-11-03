@@ -29,6 +29,16 @@ rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", 
 # to bridge the raw pointers at the init call site.
 rustls-platform-verifier = "=0.7.1"
 jni22 = { package = "jni", version = "=0.22.4" }
+# Local proxy (v2 "代打", 0.4.0): the site hands its Apple requests to
+# the app, and this client — same reqwest flavour/version and same
+# rustls root store (WebPKI + Apple Root CA) as isideload's own
+# GrandSlam client — executes them, so Apple sees the login's own TLS
+# stack instead of the browser's. Versions unify with the copies
+# isideload already pins in Cargo.lock.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2"] }
+webpki-roots = "0.26"
+serde_json = "1"
+base64 = "0.21"
 
 # Vendored isideload 0.5.2 (pristine crates.io copy in vendor/) with
 # exactly one patched area: GrandSlam's reqwest client is built with a

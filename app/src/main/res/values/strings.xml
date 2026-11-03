@@ -59,6 +59,7 @@
     <string name="wisp_regen">重新產生密鑰</string>
     <string name="wisp_url_loopback">本機位址（同台手機）：%1$s</string>
     <string name="wisp_url_lan">區網位址：%1$s</string>
+    <string name="wisp_url_proxy">本機代理位址：%1$s</string>
     <string name="wisp_copied">位址已複製</string>
     <string name="wisp_notif_channel">本地轉發</string>
     <string name="wisp_notif_title">ipaloader 本地轉發中</string>

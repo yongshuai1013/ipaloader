@@ -52,6 +52,7 @@ class MainActivity : Activity() {
     private lateinit var wispStatusText: TextView
     private lateinit var wispLoopbackText: TextView
     private lateinit var wispLanText: TextView
+    private lateinit var wispProxyText: TextView
     private lateinit var wispToggleButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -244,6 +245,10 @@ class MainActivity : Activity() {
                 WispStore.lanUrl(this@MainActivity)?.let { copyToClipboard(it) }
             }
         }
+        wispProxyText = TextView(this).apply {
+            textSize = 14f
+            setOnClickListener { copyToClipboard(WispStore.proxyUrl(this@MainActivity)) }
+        }
         wispToggleButton = Button(this).apply {
             setOnClickListener { toggleWispRelay() }
         }
@@ -262,6 +267,7 @@ class MainActivity : Activity() {
             addView(wispStatusText)
             addView(wispLoopbackText)
             addView(wispLanText)
+            addView(wispProxyText)
             addView(wispToggleButton)
             addView(regenButton)
         }
@@ -271,6 +277,8 @@ class MainActivity : Activity() {
         if (!::wispStatusText.isInitialized) return
         wispLoopbackText.text =
             getString(R.string.wisp_url_loopback, WispStore.loopbackUrl(this))
+        wispProxyText.text =
+            getString(R.string.wisp_url_proxy, WispStore.proxyUrl(this))
         val lan = WispStore.lanUrl(this)
         wispLanText.text = if (lan != null) getString(R.string.wisp_url_lan, lan) else ""
         wispLanText.visibility = if (lan != null) View.VISIBLE else View.GONE

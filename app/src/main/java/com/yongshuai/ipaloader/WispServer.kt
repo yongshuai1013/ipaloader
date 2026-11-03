@@ -358,7 +358,7 @@ private fun isDestinationAllowed(
     return policy.hostPatterns.any { it.matches(hostname) }
 }
 
-private fun isIpLiteral(hostname: String): Boolean {
+internal fun isIpLiteral(hostname: String): Boolean {
     if (hostname.contains(':')) return true // IPv6 literal
     return hostname.matches(Regex("""^\d{1,3}(\.\d{1,3}){3}$"""))
 }
@@ -370,7 +370,7 @@ private fun isIpLiteral(hostname: String): Boolean {
  * mirroring wisp-js is_ip_blocked after lookup). The socket connects
  * to the validated address itself, so check and use cannot drift.
  */
-private fun resolveAllowedAddress(policy: WispPolicy, hostname: String): InetAddress? {
+internal fun resolveAllowedAddress(policy: WispPolicy, hostname: String): InetAddress? {
     val addresses = try {
         InetAddress.getAllByName(hostname)
     } catch (e: Exception) {
@@ -385,7 +385,7 @@ private fun resolveAllowedAddress(policy: WispPolicy, hostname: String): InetAdd
  *  (java.net checks) and outside the extra non-routable IPv4 ranges
  *  ipaddr.js also treats as non-public (CGNAT, benchmarking,
  *  documentation prefixes, 240/4). */
-private fun isPublicAddress(address: InetAddress): Boolean {
+internal fun isPublicAddress(address: InetAddress): Boolean {
     if (address.isLoopbackAddress || address.isLinkLocalAddress ||
         address.isSiteLocalAddress || address.isMulticastAddress ||
         address.isAnyLocalAddress

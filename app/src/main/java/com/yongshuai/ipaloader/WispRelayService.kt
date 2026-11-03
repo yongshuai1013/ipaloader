@@ -10,11 +10,13 @@ import android.content.Intent
 import android.os.IBinder
 
 /**
- * Foreground service hosting the [WispServer] relay. While it runs,
- * the site's WISP URL can point at this phone (ws://127.0.0.1:…)
- * and the login traffic leaves through the phone's own connection.
- * Started/stopped only from the UI toggle or the notification's
- * stop action; the persistent notification is the "轉發中" signal.
+ * Foreground service hosting the local relays: the [WispServer]
+ * WISP pipe (v1) and the [ProxyServer] executing proxy (v2). While
+ * it runs, the site's WISP URL can point at this phone
+ * (ws://127.0.0.1:…) and the login traffic leaves through the
+ * phone's own connection. Started/stopped only from the UI toggle
+ * or the notification's stop action; the persistent notification is
+ * the "轉發中" signal.
  */
 class WispRelayService : Service() {
 
@@ -43,6 +45,7 @@ class WispRelayService : Service() {
     }
 
     private var server: WispServer? = null
+    private var proxyServer: ProxyServer? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -87,10 +90,34 @@ class WispRelayService : Service() {
                 stopSelf()
             }
         }
+        if (proxyServer == null) {
+            // The v2 proxy shares this service's lifecycle: the same
+            // toggle runs both relays. Its bind is synchronous; a
+            // failure is logged but does not take the WISP pipe down.
+            val proxy = ProxyServer(
+                port = WispStore.PROXY_PORT,
+                expectedToken = { WispStore.secret(applicationContext) },
+                filesDirPath = filesDir.absolutePath,
+                log = { message -> AppLog.write(filesDir, message) },
+            )
+            proxyServer = proxy
+            try {
+                proxy.start()
+            } catch (e: Exception) {
+                AppLog.write(filesDir, "本機代理啟動失敗：${e.message}")
+                proxyServer = null
+            }
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
+        try {
+            proxyServer?.stop()
+        } catch (e: Exception) {
+            // Already stopped.
+        }
+        proxyServer = null
         try {
             server?.stop(1000)
         } catch (e: Exception) {
