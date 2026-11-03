@@ -48,4 +48,19 @@
     <string name="tfa_resend">重新發送</string>
     <string name="tfa_send_devices">傳送到信任裝置</string>
     <string name="tfa_send_sms">以簡訊傳送到 ••%1$s</string>
+
+    <string name="wisp_title">本地轉發（WISP）</string>
+    <string name="wisp_desc">啟動後，把網站的 WISP 位址改填下方位址，登入流量就借這支手機的連線出去（網站伺服器的出口會被 Apple 拒絕）。轉發只允許連往 Apple 主機的 443 埠。點位址可複製。</string>
+    <string name="wisp_status_stopped">狀態：未啟動</string>
+    <string name="wisp_status_running">狀態：轉發中</string>
+    <string name="wisp_status_failed">狀態：啟動失敗（%1$s）</string>
+    <string name="wisp_start">啟動轉發</string>
+    <string name="wisp_stop">停止轉發</string>
+    <string name="wisp_regen">重新產生密鑰</string>
+    <string name="wisp_url_loopback">本機位址（同台手機）：%1$s</string>
+    <string name="wisp_url_lan">區網位址：%1$s</string>
+    <string name="wisp_copied">位址已複製</string>
+    <string name="wisp_notif_channel">本地轉發</string>
+    <string name="wisp_notif_title">ipaloader 本地轉發中</string>
+    <string name="wisp_notif_text">WISP 轉發服務正在執行，點此開啟 ipaloader</string>
 </resources>
