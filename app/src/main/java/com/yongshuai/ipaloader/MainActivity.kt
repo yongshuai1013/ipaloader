@@ -47,6 +47,7 @@ class MainActivity : Activity() {
     private lateinit var accountText: TextView
     private lateinit var teamText: TextView
     private lateinit var logoutButton: Button
+    private lateinit var signButton: Button
     private lateinit var loginForm: LinearLayout
     private lateinit var accountBox: LinearLayout
     private lateinit var wispStatusText: TextView
@@ -112,11 +113,19 @@ class MainActivity : Activity() {
             text = getString(R.string.logout)
             setOnClickListener { startLogout() }
         }
+        signButton = Button(this).apply {
+            text = getString(R.string.sign_open)
+            setOnClickListener {
+                AppLog.write(filesDir, "開啟簽名頁")
+                startActivity(Intent(this@MainActivity, SignActivity::class.java))
+            }
+        }
         accountBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
             addView(accountText)
             addView(teamText)
+            addView(signButton)
             addView(logoutButton)
         }
 

@@ -64,4 +64,33 @@
     <string name="wisp_notif_channel">本地轉發</string>
     <string name="wisp_notif_title">ipaloader 本地轉發中</string>
     <string name="wisp_notif_text">WISP 轉發服務正在執行，點此開啟 ipaloader</string>
+
+    <string name="sign_open">簽名 IPA</string>
+    <string name="sign_title">簽名 IPA</string>
+    <string name="sign_pick">選擇 IPA…</string>
+    <string name="sign_no_file">尚未選擇 IPA</string>
+    <string name="sign_copying">正在複製 IPA…</string>
+    <string name="sign_copy_failed">無法讀取所選檔案，請重新選擇。</string>
+    <string name="sign_inspecting">正在讀取 IPA 資訊…</string>
+    <string name="sign_app_info">名稱：%1$s\nBundle ID：%2$s\n版本：%3$s</string>
+    <string name="sign_inspect_failed">讀取 IPA 資訊失敗：%1$s</string>
+    <string name="sign_start">開始簽名</string>
+    <string name="sign_stages_title">簽名進度</string>
+    <string name="sign_stage_cert">證書（專屬 machineName：ipaloader）</string>
+    <string name="sign_stage_appid">App ID（自動註冊／複用）</string>
+    <string name="sign_stage_profile">描述檔（下載）</string>
+    <string name="sign_stage_sign">簽名</string>
+    <string name="sign_stage_zip">打包成 IPA</string>
+    <string name="sign_working">簽名中…</string>
+    <string name="sign_done_path">已簽 IPA：%1$s</string>
+    <string name="sign_expiry">描述檔到期：%1$s（建立日起 7 天）</string>
+    <string name="sign_expiry_unknown">未取得</string>
+    <string name="sign_new_bundle">簽名後 Bundle ID：%1$s</string>
+    <string name="sign_save_as">另存到…</string>
+    <string name="sign_saved">已另存</string>
+    <string name="sign_no_session">登入已失效，請回主畫面重新登入後再試。</string>
+    <string name="sign_failed">簽名失敗：%1$s</string>
+    <string name="sign_cert_limit_title">證書已達上限</string>
+    <string name="sign_cert_limit_body">免費帳號最多 2 張證書，目前已滿。ipaloader 不會自動撤銷任何證書——請先在其他工具（例如 EiliStore）手動撤銷一張不需要的證書，再回來重試。\n現有證書：</string>
+    <string name="sign_cert_line">・%1$s（machineName：%2$s，到期：%3$s）</string>
 </resources>

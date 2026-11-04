@@ -39,6 +39,13 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls-no-p
 webpki-roots = "0.26"
 serde_json = "1"
 base64 = "0.21"
+# M3 signing (0.5.0): apple-codesign-quick is isideload's own signing
+# engine; ipaloader_core uses its ProvisioningProfile parser directly
+# to read the signed bundle's embedded profile expiry. zip writes the
+# re-zipped output IPA (reading is already in the tree via isideload).
+# Both crates are already in Cargo.lock at these exact versions.
+apple-codesign-quick = "0.1.0"
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Vendored isideload 0.5.2 (pristine crates.io copy in vendor/) with
 # exactly one patched area: GrandSlam's reqwest client is built with a

@@ -1489,6 +1489,7 @@ dependencies = [
 name = "ipaloader_core"
 version = "0.1.0"
 dependencies = [
+ "apple-codesign-quick",
  "base64 0.21.7",
  "idevice",
  "isideload",
@@ -1502,6 +1503,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "webpki-roots 0.26.11",
+ "zip",
 ]
 
 [[package]]

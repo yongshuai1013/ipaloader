@@ -889,3 +889,516 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_ProxyNative_nativeProxyFetch
     };
     make_jstring(&mut env, &text)
 }
+
+// ---------------------------------------------------------------------------
+// M3: IPA signing (0.5.0).
+//
+// JNI surface (on `com.yongshuai.ipaloader.SignActivity`):
+// - `nativeInspectIpa(ipaPath, filesDir)` — reads the target app's
+//   bundle id / name / version out of an IPA without touching the
+//   network. Same result protocol as login: `OK\n…` / `ERR\n…`.
+// - `nativeSignIpa(ipaPath, outPath, filesDir)` — the full portal
+//   flow on the restored M2 session, driven by isideload's own
+//   `Sideloader::sign_app` (certificate -> bundle id rewrite ->
+//   App IDs -> app group -> team provisioning profile -> bundle
+//   signing via apple-codesign-quick), then re-zips the signed .app
+//   into the output IPA and reads the embedded profile's expiry.
+//   Progress reaches Kotlin through `SignActivity.onSignProgress`
+//   with stage keys: cert / appid / profile / sign / zip. Success is
+//   `OK\n<output path>\n<profile expiry RFC3339 or empty>\n<new
+//   bundle id>`; the certificate-limit stop is
+//   `CERTLIMIT\n<json array of {name, machineName, expires}>`.
+//
+// Certificate hard rules (GOAL.md) and how this code keeps them:
+// - The portal certificate is registered under one dedicated
+//   machine name, MACHINE_NAME below. `CertificateIdentity::retrieve`
+//   reuses the existing certificate when the stored private key
+//   still matches it, and only submits a CSR for a new one when no
+//   match exists.
+// - Nothing here ever revokes a certificate. When Apple refuses a
+//   new certificate with error 7460 (the free-account maximum),
+//   isideload invokes the MaxCertsBehavior::Prompt callback; the
+//   callback below only *records* the existing certificates and
+//   returns `Ok(None)` — "revoke nothing" — which stops the library
+//   with the 7460 error. The JNI layer then reports CERTLIMIT so
+//   the UI can list the certificates and let the user decide
+//   manually, outside this app.
+// - App IDs: the library's `register_app_ids` lists the team's App
+//   IDs first and only creates the ones that are missing.
+// ---------------------------------------------------------------------------
+
+/// Dedicated portal-certificate machine name for this app.
+const MACHINE_NAME: &str = "ipaloader";
+
+/// isideload-vfs resolves its temp dir through `std::env::temp_dir`,
+/// which on Android (no TMPDIR set) is `/tmp` — not writable by an
+/// app process. Point it at an app-private directory before any
+/// `Application` extraction happens. Done once per process.
+fn ensure_tmp_dir(files_dir: &str) {
+    static TMP_ONCE: Once = Once::new();
+    TMP_ONCE.call_once(|| {
+        let dir = PathBuf::from(files_dir).join("core").join("tmp");
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("TMPDIR", &dir);
+        logf!("sign: TMPDIR -> {}", dir.display());
+    });
+}
+
+/// Progress bridge from the signing flow to
+/// `SignActivity.onSignProgress(String)`. Fire-and-forget: a failed
+/// callback is logged, never fatal to signing.
+struct SignProgressBridge {
+    vm: JavaVM,
+    callback: GlobalRef,
+}
+
+impl SignProgressBridge {
+    fn stage(&self, stage: &str) {
+        logf!("sign stage: {}", stage);
+        let mut env = match self.vm.attach_current_thread() {
+            Ok(e) => e,
+            Err(e) => {
+                logf!("sign progress: attach failed: {}", e);
+                return;
+            }
+        };
+        let Ok(j_stage) = env.new_string(stage) else {
+            return;
+        };
+        let result = env.call_method(
+            self.callback.as_obj(),
+            "onSignProgress",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&j_stage)],
+        );
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+            logf!("sign progress: Kotlin callback threw (ignored)");
+            return;
+        }
+        if let Err(e) = result {
+            logf!("sign progress: call failed: {}", e);
+        }
+    }
+}
+
+/// One existing portal certificate, as reported to the UI when the
+/// certificate limit is hit. `expires` is RFC 3339 (plist::Date's
+/// XML format); the UI reformats it for display.
+#[derive(Clone)]
+struct CertSummary {
+    name: String,
+    machine_name: String,
+    expires: String,
+}
+
+fn cert_summary(
+    cert: &isideload::dev::certificates::DevelopmentCertificate,
+) -> CertSummary {
+    CertSummary {
+        name: cert.name.clone().unwrap_or_default(),
+        machine_name: cert.machine_name.clone().unwrap_or_default(),
+        expires: cert
+            .expiration_date
+            .as_ref()
+            .map(|d| d.to_xml_format())
+            .unwrap_or_default(),
+    }
+}
+
+fn cert_limit_json(certs: &[CertSummary]) -> String {
+    let list: Vec<serde_json::Value> = certs
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "machineName": c.machine_name,
+                "expires": c.expires,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(list).to_string()
+}
+
+fn do_inspect(ipa_path: &str, files_dir: &str) -> String {
+    use isideload::sideload::application::Application;
+    ensure_tmp_dir(files_dir);
+    logf!("inspect start: {}", ipa_path);
+    let app = match Application::new(PathBuf::from(ipa_path)) {
+        Ok(a) => a,
+        Err(e) => {
+            logf!("inspect failed: {:?}", e);
+            return err_string(&e);
+        }
+    };
+    let bundle_id = app.main_bundle_id().unwrap_or_default();
+    let name = app.main_app_name().unwrap_or_default();
+    let info = &app.bundle.app_info;
+    let short = info
+        .get("CFBundleShortVersionString")
+        .and_then(|v| v.as_string())
+        .unwrap_or("");
+    let build = info
+        .get("CFBundleVersion")
+        .and_then(|v| v.as_string())
+        .unwrap_or("");
+    let version = if short.is_empty() {
+        build.to_string()
+    } else if build.is_empty() || build == short {
+        short.to_string()
+    } else {
+        format!("{} ({})", short, build)
+    };
+    logf!(
+        "inspect ok: bundle={} name={} version={}",
+        bundle_id, name, version
+    );
+    format!(
+        "OK\n{}\n{}\n{}",
+        bundle_id.replace('\n', " "),
+        name.replace('\n', " "),
+        version.replace('\n', " ")
+    )
+}
+
+fn read_bundle_id(app_dir: &std::path::Path) -> String {
+    let info_path = app_dir.join("Info.plist");
+    let Ok(bytes) = std::fs::read(&info_path) else {
+        return String::new();
+    };
+    let Ok(value) = plist::Value::from_reader(std::io::Cursor::new(bytes)) else {
+        return String::new();
+    };
+    let plist::Value::Dictionary(dict) = value else {
+        return String::new();
+    };
+    dict.get("CFBundleIdentifier")
+        .and_then(|v| v.as_string())
+        .unwrap_or("")
+        .to_string()
+}
+
+async fn do_sign(
+    files_dir: String,
+    ipa_path: String,
+    out_path: String,
+    bridge: Arc<SignProgressBridge>,
+) -> String {
+    use isideload::dev::certificates::DevelopmentCertificate;
+    use isideload::sideload::builder::{
+        ExtensionsBehavior, ExtensionsBehaviorSelection, MaxCertsBehavior,
+    };
+    use isideload::sideload::{SideloaderBuilder, TeamSelection};
+    use isideload::util::callbacks::ExtensionsBehaviorCallbackBox;
+
+    ensure_tmp_dir(&files_dir);
+    logf!("sign start: {}", ipa_path);
+    let Some((email, spd)) = load_session(&files_dir) else {
+        logf!("sign: no saved session");
+        return "ERR\nNO_SESSION\n尚未登入，請先登入 Apple ID".to_string();
+    };
+    let provider = match anisette_provider(&files_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            logf!("sign: anisette provider failed: {:?}", e);
+            return err_string(&e);
+        }
+    };
+    let mut account = match AppleAccountBuilder::new(&email)
+        .anisette_provider(provider)
+        .build()
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            logf!("sign: account build failed: {:?}", e);
+            return err_string(&e);
+        }
+    };
+    account.spd = Some(spd);
+    // Same session validation as restore: a real app-token exchange
+    // happens inside from_account before any portal mutation.
+    let dev_session = match DeveloperSession::from_account(&mut account).await {
+        Ok(s) => s,
+        Err(e) => {
+            logf!("sign: developer session failed: {:?}", e);
+            return err_string(&e);
+        }
+    };
+    logf!("sign: developer session ready for {}", email);
+
+    bridge.stage("cert");
+    let cert_limit: Arc<Mutex<Option<Vec<CertSummary>>>> = Arc::new(Mutex::new(None));
+    let cert_limit_cb = cert_limit.clone();
+    // The prompt callback is where the library asks "which of these
+    // certificates may I revoke?" — the answer is always "none".
+    // Returning Ok(None) stops the flow with Apple's 7460 error and
+    // leaves every certificate untouched; the captured list is
+    // reported to the UI instead (see the CERTLIMIT result below).
+    let max_certs = MaxCertsBehavior::Prompt(
+        move |certs: Vec<DevelopmentCertificate>| {
+            let slot = cert_limit_cb.clone();
+            async move {
+                let summaries: Vec<CertSummary> =
+                    certs.iter().map(cert_summary).collect();
+                logf!(
+                    "sign: certificate limit (7460): {} existing certificates, revoking none",
+                    summaries.len()
+                );
+                if let Ok(mut guard) = slot.lock() {
+                    *guard = Some(summaries);
+                }
+                Ok(None)
+            }
+        },
+    );
+
+    let builder: SideloaderBuilder<_, ExtensionsBehaviorCallbackBox> =
+        SideloaderBuilder::new(dev_session, email.clone())
+            .team_selection(TeamSelection::First)
+            .machine_name(MACHINE_NAME.to_string())
+            .max_certs_behavior(max_certs)
+            .extensions_behavior(ExtensionsBehaviorSelection::Fixed(
+                ExtensionsBehavior::RegisterAll,
+            ))
+            .storage(Box::new(session_storage(&files_dir)));
+    let mut loader = builder.build();
+
+    let progress_bridge = bridge.clone();
+    let progress = move |p: f32| {
+        let b = progress_bridge.clone();
+        async move {
+            let stage = if p < 0.15 {
+                "appid"
+            } else if p < 0.3 {
+                "profile"
+            } else {
+                "sign"
+            };
+            b.stage(stage);
+        }
+    };
+
+    let signed = loader
+        .sign_app(
+            PathBuf::from(&ipa_path),
+            None,
+            false,
+            Some(progress),
+            None,
+            None,
+        )
+        .await;
+    let (signed_dir, _special) = match signed {
+        Ok(v) => v,
+        Err(e) => {
+            if let Ok(guard) = cert_limit.lock() {
+                if let Some(certs) = guard.as_ref() {
+                    logf!("sign stopped: certificate limit");
+                    return format!("CERTLIMIT\n{}", cert_limit_json(certs));
+                }
+            }
+            logf!("sign failed: {:?}", e);
+            return err_string(&e);
+        }
+    };
+    logf!("sign: bundle signed at {}", signed_dir.display());
+
+    bridge.stage("zip");
+    // The embedded profile is the authoritative expiry source: it is
+    // what iOS enforces, created moments ago (free-provisioning
+    // profiles live 7 days from their creation time).
+    let mut expiry_iso = String::new();
+    let profile_path = signed_dir.join("embedded.mobileprovision");
+    match std::fs::read(&profile_path) {
+        Ok(bytes) => match apple_codesign_quick::ProvisioningProfile::parse(&bytes) {
+            Ok(profile) => {
+                if let Some(plist::Value::Date(d)) = profile.plist().get("ExpirationDate") {
+                    expiry_iso = d.to_xml_format();
+                }
+                logf!(
+                    "sign: embedded profile parsed (expiry present: {})",
+                    !expiry_iso.is_empty()
+                );
+            }
+            Err(e) => logf!("sign: embedded profile parse failed: {}", e),
+        },
+        Err(e) => logf!("sign: embedded.mobileprovision unreadable: {}", e),
+    }
+
+    let signed_bundle_id = read_bundle_id(&signed_dir);
+    let size = match zip_app_bundle(&signed_dir, &out_path) {
+        Ok(s) => s,
+        Err(e) => {
+            logf!("sign: rezip failed: {}", e);
+            return format!("ERR\nUNKNOWN\n{}", e.replace('\n', " "));
+        }
+    };
+    logf!(
+        "sign ok: {} ({} bytes), bundle {}, profile expiry {}",
+        out_path, size, signed_bundle_id, expiry_iso
+    );
+    // Best-effort cleanup of the extraction tree the signed bundle
+    // lives in (<tmp>/<ipa file name>_extracted).
+    if let Some(root) = signed_dir.ancestors().nth(2) {
+        let root = root.to_path_buf();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    format!(
+        "OK\n{}\n{}\n{}",
+        out_path.replace('\n', " "),
+        expiry_iso,
+        signed_bundle_id.replace('\n', " ")
+    )
+}
+
+/// Re-zip a signed .app bundle into an installable IPA at
+/// `out_path` (`Payload/<App>.app/…`), preserving unix permissions
+/// (the main executable must stay executable) and symlinks.
+fn zip_app_bundle(app_dir: &std::path::Path, out_path: &str) -> Result<u64, String> {
+    let app_name = app_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| "signed bundle has no name".to_string())?;
+    let out = PathBuf::from(out_path);
+    if let Some(parent) = out.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create output dir: {}", e))?;
+    }
+    let file = std::fs::File::create(&out).map_err(|e| format!("create output: {}", e))?;
+    let mut writer = zip::ZipWriter::new(file);
+
+    // Collect the tree first so entries land in a stable order.
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![app_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let read = std::fs::read_dir(&dir).map_err(|e| format!("read dir: {}", e))?;
+        for entry in read {
+            let entry = entry.map_err(|e| format!("read entry: {}", e))?;
+            let path = entry.path();
+            let is_dir = entry
+                .file_type()
+                .map(|ft| ft.is_dir())
+                .unwrap_or(false);
+            paths.push(path.clone());
+            if is_dir {
+                stack.push(path);
+            }
+        }
+    }
+    paths.sort();
+
+    for path in paths {
+        let rel = path
+            .strip_prefix(app_dir)
+            .map_err(|e| format!("strip prefix: {}", e))?;
+        let entry_name = format!("Payload/{}/{}", app_name, rel.to_string_lossy());
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("stat {}: {}", entry_name, e))?;
+        let mode = {
+            use std::os::unix::fs::PermissionsExt as _;
+            meta.permissions().mode()
+        };
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&path)
+                .map_err(|e| format!("read link {}: {}", entry_name, e))?;
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(0o120_777);
+            writer
+                .start_file(&entry_name, options)
+                .map_err(|e| format!("zip link {}: {}", entry_name, e))?;
+            writer
+                .write_all(target.to_string_lossy().as_bytes())
+                .map_err(|e| format!("zip link write {}: {}", entry_name, e))?;
+        } else if meta.is_dir() {
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored)
+                .unix_permissions(mode & 0o7777);
+            writer
+                .start_file(format!("{}/", entry_name), options)
+                .map_err(|e| format!("zip dir {}: {}", entry_name, e))?;
+        } else {
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .unix_permissions(mode & 0o7777);
+            writer
+                .start_file(&entry_name, options)
+                .map_err(|e| format!("zip file {}: {}", entry_name, e))?;
+            let mut f = std::fs::File::open(&path)
+                .map_err(|e| format!("open {}: {}", entry_name, e))?;
+            std::io::copy(&mut f, &mut writer)
+                .map_err(|e| format!("zip write {}: {}", entry_name, e))?;
+        }
+    }
+    writer.finish().map_err(|e| format!("zip finish: {}", e))?;
+    let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+    Ok(size)
+}
+
+/// `external fun nativeInspectIpa(ipaPath, filesDir): String` in
+/// `com.yongshuai.ipaloader.SignActivity`.
+#[no_mangle]
+pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeInspectIpa(
+    mut env: JNIEnv,
+    this: JObject,
+    ipa_path: JString,
+    files_dir: JString,
+) -> jstring {
+    let ipa_path = jstring_to_rust(&mut env, &ipa_path);
+    let files_dir = jstring_to_rust(&mut env, &files_dir);
+    init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        do_inspect(&ipa_path, &files_dir)
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeInspectIpa PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
+    make_jstring(&mut env, &text)
+}
+
+/// `external fun nativeSignIpa(ipaPath, outPath, filesDir): String`
+/// in `com.yongshuai.ipaloader.SignActivity`. Blocking: run on a
+/// background thread. `this` must implement
+/// `onSignProgress(String)`.
+#[no_mangle]
+pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeSignIpa(
+    mut env: JNIEnv,
+    this: JObject,
+    ipa_path: JString,
+    out_path: JString,
+    files_dir: JString,
+) -> jstring {
+    let ipa_path = jstring_to_rust(&mut env, &ipa_path);
+    let out_path = jstring_to_rust(&mut env, &out_path);
+    let files_dir = jstring_to_rust(&mut env, &files_dir);
+    init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
+    logf!("nativeSignIpa called");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let vm = match env.get_java_vm() {
+            Ok(vm) => vm,
+            Err(e) => return format!("ERR\nUNKNOWN\nJNI VM: {}", e),
+        };
+        let callback = match env.new_global_ref(&this) {
+            Ok(r) => r,
+            Err(e) => return format!("ERR\nUNKNOWN\nJNI ref: {}", e),
+        };
+        let bridge = Arc::new(SignProgressBridge { vm, callback });
+        runtime().block_on(do_sign(files_dir, ipa_path, out_path, bridge))
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeSignIpa PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
+    make_jstring(&mut env, &text)
+}
