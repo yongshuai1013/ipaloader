@@ -909,6 +909,12 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_ProxyNative_nativeProxyFetch
 //   bundle id>`; the certificate-limit stop is
 //   `CERTLIMIT\n<json array of {name, machineName, expires}>`.
 //
+// M3.1 (0.5.1) adds the device stage and the pairing import (see
+// the M3.1 section below): stage keys gain "device" in front, the
+// no-pairing stop is the literal `NODEVICE`, and portal verdicts
+// (DeveloperError) are reported as `ERR\nPORTAL\n<code>：<server
+// message>` via sign_err_string instead of the generic classifier.
+//
 // Certificate hard rules (GOAL.md) and how this code keeps them:
 // - The portal certificate is registered under one dedicated
 //   machine name, MACHINE_NAME below. `CertificateIdentity::retrieve`
@@ -1078,6 +1084,231 @@ fn read_bundle_id(app_dir: &std::path::Path) -> String {
         .to_string()
 }
 
+// ---------------------------------------------------------------------------
+// M3.1: target device from an imported pairing file (0.5.1).
+//
+// The first real-device sign (0.5.0) died at the profile stage with
+// DeveloperError 8220, "Your team has no devices from which to
+// generate a provisioning profile": the team had no registered
+// device UDIDs and the M3 flow never registered one. The fix pulls
+// one small piece of M4 forward — the target device comes from the
+// imported lockdown pairing file (the v1 route for device identity):
+//
+// - `nativeImportPairing(srcPath, filesDir)` parses the pairing
+//   plist (XML or binary) with the plist crate, extracts the UDID
+//   (and a device name if the file happens to carry one), stores
+//   the raw pairing file at `<filesDir>/pairing/pairing.plist` for
+//   M4's lockdown connection, and records udid/name alongside it.
+//   Parse problems come back as `ERR\nPAIRING\n<人話訊息>`.
+// - `nativeGetPairing(filesDir)` reports the stored target as
+//   `OK\n<udid>\n<name>` or `NONE`, so the sign page can show the
+//   current target device.
+// - `do_sign` runs a new "device" stage before anything else: with
+//   no imported pairing file it stops there (`NODEVICE`) instead of
+//   letting the raw 8220 surface later; otherwise it makes sure the
+//   target UDID is registered on the team (see ensure_team_device).
+// ---------------------------------------------------------------------------
+
+/// The imported target device: UDID from the pairing file, plus a
+/// device name when the file carried one (standard lockdown pairing
+/// records do not, so this is usually empty).
+struct PairingInfo {
+    udid: String,
+    name: String,
+}
+
+fn pairing_dir(files_dir: &str) -> PathBuf {
+    PathBuf::from(files_dir).join("pairing")
+}
+
+fn load_pairing(files_dir: &str) -> Option<PairingInfo> {
+    let dir = pairing_dir(files_dir);
+    let udid = std::fs::read_to_string(dir.join("udid.txt"))
+        .ok()?
+        .trim()
+        .to_string();
+    if udid.is_empty() {
+        return None;
+    }
+    let name = std::fs::read_to_string(dir.join("name.txt"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    Some(PairingInfo { udid, name })
+}
+
+/// UDIDs are device identifiers; logs and stage lines carry only
+/// the last 6 characters.
+fn mask_udid(udid: &str) -> String {
+    let tail: String = udid
+        .chars()
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("…{}", tail)
+}
+
+fn do_import_pairing(src_path: &str, files_dir: &str) -> String {
+    logf!("pairing import start: {}", src_path);
+    let bytes = match std::fs::read(src_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return format!("ERR\nPAIRING\n無法讀取所選檔案：{}", e);
+        }
+    };
+    let value = match plist::Value::from_reader(std::io::Cursor::new(&bytes)) {
+        Ok(v) => v,
+        Err(_) => {
+            return "ERR\nPAIRING\n配對檔解析失敗：不是有效的 plist 檔案，請確認選的是配對檔"
+                .to_string();
+        }
+    };
+    let plist::Value::Dictionary(dict) = value else {
+        return "ERR\nPAIRING\n配對檔解析失敗：內容不是配對記錄的格式".to_string();
+    };
+    let udid = dict
+        .get("UDID")
+        .and_then(|v| v.as_string())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    // UDIDs are 40 hex chars (older devices) or 8 hex + "-" + 16
+    // hex (newer). Accept hex/dash only, with a sane length floor.
+    let valid = udid.len() >= 20 && udid.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    if !valid {
+        return "ERR\nPAIRING\n配對檔解析失敗：找不到裝置 UDID，請確認選的是與 iPhone 配對產生的配對檔"
+            .to_string();
+    }
+    let name = dict
+        .get("DeviceName")
+        .and_then(|v| v.as_string())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let dir = pairing_dir(files_dir);
+    let writes = std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(dir.join("pairing.plist"), &bytes))
+        .and_then(|_| std::fs::write(dir.join("udid.txt"), &udid))
+        .and_then(|_| std::fs::write(dir.join("name.txt"), &name));
+    if let Err(e) = writes {
+        return format!("ERR\nPAIRING\n配對檔儲存失敗：{}", e);
+    }
+    logf!("pairing imported: udid {}", mask_udid(&udid));
+    format!(
+        "OK\n{}\n{}",
+        udid.replace('\n', " "),
+        name.replace('\n', " ")
+    )
+}
+
+fn do_pairing_info(files_dir: &str) -> String {
+    match load_pairing(files_dir) {
+        Some(p) => format!(
+            "OK\n{}\n{}",
+            p.udid.replace('\n', " "),
+            p.name.replace('\n', " ")
+        ),
+        None => "NONE".to_string(),
+    }
+}
+
+/// The portal's DeveloperError (a server verdict) buried anywhere
+/// in a report's cause chain, if there is one.
+fn developer_error(report: &Report) -> Option<(i64, String)> {
+    for node in report.iter_reports() {
+        if let Some(isideload::SideloadError::DeveloperError(code, message)) =
+            node.downcast_current_context::<isideload::SideloadError>()
+        {
+            return Some((*code, message.clone()));
+        }
+    }
+    None
+}
+
+/// Error mapping for the sign flow only (the login flow keeps the
+/// shared `classify`). A DeveloperError is Apple's verdict, never a
+/// connectivity problem — the generic heuristic used to file 8220
+/// under NETWORK because its own message contains the words
+/// "Connect" and "Certificates". DeveloperErrors surface as PORTAL
+/// with the server's message verbatim; NETWORK is reserved for
+/// actual transport failures (reqwest send errors, DNS, timeouts).
+fn sign_err_string(report: &Report) -> String {
+    if let Some((code, message)) = developer_error(report) {
+        return format!("ERR\nPORTAL\n{}：{}", code, message.replace('\n', " "));
+    }
+    let chain = format!("{:?}", report).to_lowercase();
+    let code = if chain.contains("anisette") {
+        "ANISETTE"
+    } else if chain.contains("error sending request")
+        || chain.contains("dns")
+        || chain.contains("timed out")
+        || chain.contains("timeout")
+    {
+        "NETWORK"
+    } else {
+        "UNKNOWN"
+    };
+    let (_, message) = classify(report);
+    format!("ERR\n{}\n{}", code, message)
+}
+
+/// Make sure the target device is registered on the team, using
+/// the library's own DevicesApi (QH65B2 listDevices / addDevice) —
+/// the same calls `Sideloader::install_app` makes before signing,
+/// except the device here comes from the imported pairing file
+/// instead of a live lockdown connection. Lists first and only
+/// registers when the target UDID is genuinely missing (other
+/// devices on the team do not count: M4 installs to *this* one).
+/// A racing registration (DeveloperError 35) is treated as success,
+/// mirroring the library's own `ensure_device_registered`.
+async fn ensure_team_device(
+    session: &mut DeveloperSession,
+    team: &isideload::dev::teams::DeveloperTeam,
+    pairing: &PairingInfo,
+) -> Result<(), Report> {
+    use isideload::dev::devices::DevicesApi;
+
+    let devices = session
+        .list_devices(team, None)
+        .await
+        .context("Failed to list developer devices")?;
+    let already = devices
+        .iter()
+        .any(|d| d.device_number.trim().eq_ignore_ascii_case(&pairing.udid));
+    if already {
+        logf!(
+            "sign device: target {} already registered ({} device(s) on team)",
+            mask_udid(&pairing.udid),
+            devices.len()
+        );
+        return Ok(());
+    }
+    let reg_name = if pairing.name.is_empty() {
+        MACHINE_NAME
+    } else {
+        pairing.name.as_str()
+    };
+    match session.add_device(team, reg_name, &pairing.udid, None).await {
+        Ok(_) => {
+            logf!(
+                "sign device: registered target {} as \"{}\" ({} device(s) before)",
+                mask_udid(&pairing.udid),
+                reg_name,
+                devices.len()
+            );
+            Ok(())
+        }
+        Err(e) => {
+            if matches!(developer_error(&e), Some((35, _))) {
+                logf!("sign device: add raced an existing registration (35), continuing");
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 async fn do_sign(
     files_dir: String,
     ipa_path: String,
@@ -1093,6 +1324,15 @@ async fn do_sign(
 
     ensure_tmp_dir(&files_dir);
     logf!("sign start: {}", ipa_path);
+    // M3.1 device stage: without an imported pairing file there is
+    // no target device to register — stop here with a clear result
+    // instead of dying at the profile stage with Apple's raw 8220.
+    bridge.stage("device");
+    let Some(pairing) = load_pairing(&files_dir) else {
+        logf!("sign: no pairing file imported, stopping at device stage");
+        return "NODEVICE".to_string();
+    };
+    logf!("sign: target device {}", mask_udid(&pairing.udid));
     let Some((email, spd)) = load_session(&files_dir) else {
         logf!("sign: no saved session");
         return "ERR\nNO_SESSION\n尚未登入，請先登入 Apple ID".to_string();
@@ -1101,7 +1341,7 @@ async fn do_sign(
         Ok(p) => p,
         Err(e) => {
             logf!("sign: anisette provider failed: {:?}", e);
-            return err_string(&e);
+            return sign_err_string(&e);
         }
     };
     let mut account = match AppleAccountBuilder::new(&email)
@@ -1112,7 +1352,7 @@ async fn do_sign(
         Ok(a) => a,
         Err(e) => {
             logf!("sign: account build failed: {:?}", e);
-            return err_string(&e);
+            return sign_err_string(&e);
         }
     };
     account.spd = Some(spd);
@@ -1122,12 +1362,11 @@ async fn do_sign(
         Ok(s) => s,
         Err(e) => {
             logf!("sign: developer session failed: {:?}", e);
-            return err_string(&e);
+            return sign_err_string(&e);
         }
     };
     logf!("sign: developer session ready for {}", email);
 
-    bridge.stage("cert");
     let cert_limit: Arc<Mutex<Option<Vec<CertSummary>>>> = Arc::new(Mutex::new(None));
     let cert_limit_cb = cert_limit.clone();
     // The prompt callback is where the library asks "which of these
@@ -1164,6 +1403,22 @@ async fn do_sign(
             .storage(Box::new(session_storage(&files_dir)));
     let mut loader = builder.build();
 
+    // M3.1: register the target device on the team (list → add
+    // only if missing) before sign_app reaches the profile stage,
+    // where an unregistered-device team fails with error 8220.
+    let team = match loader.get_team().await {
+        Ok(t) => t,
+        Err(e) => {
+            logf!("sign: team resolution failed: {:?}", e);
+            return sign_err_string(&e);
+        }
+    };
+    if let Err(e) = ensure_team_device(loader.get_dev_session(), &team, &pairing).await {
+        logf!("sign: device registration failed: {:?}", e);
+        return sign_err_string(&e);
+    }
+
+    bridge.stage("cert");
     let progress_bridge = bridge.clone();
     let progress = move |p: f32| {
         let b = progress_bridge.clone();
@@ -1182,7 +1437,7 @@ async fn do_sign(
     let signed = loader
         .sign_app(
             PathBuf::from(&ipa_path),
-            None,
+            Some(team),
             false,
             Some(progress),
             None,
@@ -1199,7 +1454,7 @@ async fn do_sign(
                 }
             }
             logf!("sign failed: {:?}", e);
-            return err_string(&e);
+            return sign_err_string(&e);
         }
     };
     logf!("sign: bundle signed at {}", signed_dir.display());
@@ -1397,6 +1652,62 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeSignIpa(
         Err(payload) => {
             let msg = panic_message(&*payload);
             logf!("nativeSignIpa PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
+    make_jstring(&mut env, &text)
+}
+
+/// `external fun nativeImportPairing(srcPath, filesDir): String` in
+/// `com.yongshuai.ipaloader.SignActivity` (M3.1). Parses the picked
+/// lockdown pairing file and stores it (plus its UDID) as the sign
+/// flow's target device. Result: `OK\n<udid>\n<name>` or
+/// `ERR\nPAIRING\n<message>`.
+#[no_mangle]
+pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeImportPairing(
+    mut env: JNIEnv,
+    this: JObject,
+    src_path: JString,
+    files_dir: JString,
+) -> jstring {
+    let src_path = jstring_to_rust(&mut env, &src_path);
+    let files_dir = jstring_to_rust(&mut env, &files_dir);
+    init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        do_import_pairing(&src_path, &files_dir)
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeImportPairing PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
+    make_jstring(&mut env, &text)
+}
+
+/// `external fun nativeGetPairing(filesDir): String` in
+/// `com.yongshuai.ipaloader.SignActivity` (M3.1). Reports the
+/// stored target device: `OK\n<udid>\n<name>` or `NONE`.
+#[no_mangle]
+pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeGetPairing(
+    mut env: JNIEnv,
+    this: JObject,
+    files_dir: JString,
+) -> jstring {
+    let files_dir = jstring_to_rust(&mut env, &files_dir);
+    init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        do_pairing_info(&files_dir)
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeGetPairing PANIC caught: {}", msg);
             format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
         }
     };

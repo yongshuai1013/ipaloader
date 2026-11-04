@@ -25,16 +25,28 @@ import java.util.TimeZone
  * profile -> bundle signing -> re-zip into an installable IPA under
  * `<filesDir>/signed/`, with an optional "save to…" copy afterwards.
  *
+ * M3.1: the sign flow also needs a target device — the team
+ * provisioning profile cannot be generated until the device is
+ * registered on the team. The device comes from an imported
+ * lockdown pairing file (picked here, parsed and stored by the
+ * Rust core). The stage list therefore starts with a "device"
+ * stage; with no pairing file imported, signing stops there with
+ * a NODEVICE result instead of Apple's raw 8220 profile error.
+ *
  * The Rust core reports stage keys through [onSignProgress]:
- * cert / appid / profile / sign / zip. A certificate-limit stop
- * comes back as a CERTLIMIT result carrying the existing
+ * device / cert / appid / profile / sign / zip. A certificate-limit
+ * stop comes back as a CERTLIMIT result carrying the existing
  * certificates; nothing is ever revoked automatically.
  */
 class SignActivity : Activity() {
 
     external fun nativeInspectIpa(ipaPath: String, filesDir: String): String
     external fun nativeSignIpa(ipaPath: String, outPath: String, filesDir: String): String
+    external fun nativeImportPairing(srcPath: String, filesDir: String): String
+    external fun nativeGetPairing(filesDir: String): String
 
+    private lateinit var deviceText: TextView
+    private lateinit var importButton: Button
     private lateinit var pickButton: Button
     private lateinit var infoText: TextView
     private lateinit var signButton: Button
@@ -43,7 +55,7 @@ class SignActivity : Activity() {
     private lateinit var limitText: TextView
     private lateinit var saveButton: Button
 
-    private val stageOrder = listOf("cert", "appid", "profile", "sign", "zip")
+    private val stageOrder = listOf("device", "cert", "appid", "profile", "sign", "zip")
     private val stageLabels = LinkedHashMap<String, TextView>()
     private var stageReached = -1
     private var stageFailed = false
@@ -60,6 +72,19 @@ class SignActivity : Activity() {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 32)
+        }
+
+        val deviceTitle = TextView(this).apply {
+            textSize = 16f
+            text = getString(R.string.sign_device_title)
+        }
+        deviceText = TextView(this).apply {
+            textSize = 15f
+            text = getString(R.string.sign_device_none)
+        }
+        importButton = Button(this).apply {
+            text = getString(R.string.sign_import_pairing)
+            setOnClickListener { pickPairing() }
         }
 
         pickButton = Button(this).apply {
@@ -82,12 +107,16 @@ class SignActivity : Activity() {
             setPadding(0, 32, 0, 8)
             text = getString(R.string.sign_stages_title)
         }
+        layout.addView(deviceTitle)
+        layout.addView(deviceText)
+        layout.addView(importButton)
         layout.addView(pickButton)
         layout.addView(infoText)
         layout.addView(signButton)
         layout.addView(progressBar)
         layout.addView(stageTitle)
         val labelRes = mapOf(
+            "device" to R.string.sign_stage_device,
             "cert" to R.string.sign_stage_cert,
             "appid" to R.string.sign_stage_appid,
             "profile" to R.string.sign_stage_profile,
@@ -124,6 +153,7 @@ class SignActivity : Activity() {
 
         setContentView(layout)
         AppLog.write(filesDir, "開啟簽名頁")
+        refreshPairingUi()
     }
 
     // -- Stage checklist ---------------------------------------------------
@@ -172,6 +202,96 @@ class SignActivity : Activity() {
         runOnUiThread { applyStage(stage) }
     }
 
+    // -- Target device (pairing file) ----------------------------------------
+
+    private fun refreshPairingUi() {
+        Thread {
+            val result = try {
+                nativeGetPairing(filesDir.absolutePath)
+            } catch (e: UnsatisfiedLinkError) {
+                "NONE"
+            }
+            runOnUiThread {
+                val parts = result.split("\n", limit = 3)
+                if (parts[0] == "OK") {
+                    showPairing(parts.getOrElse(1) { "" }, parts.getOrElse(2) { "" })
+                } else {
+                    deviceText.text = getString(R.string.sign_device_none)
+                }
+            }
+        }.start()
+    }
+
+    /** Shows the stored target device: name (if any) + UDID tail. */
+    private fun showPairing(udid: String, name: String) {
+        val tail = udid.takeLast(8)
+        deviceText.text = if (name.isNotEmpty()) {
+            getString(R.string.sign_device_info, name, tail)
+        } else {
+            getString(R.string.sign_device_info_noname, tail)
+        }
+    }
+
+    private fun pickPairing() {
+        if (busy) return
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        startActivityForResult(intent, REQ_PICK_PAIRING)
+    }
+
+    private fun onPairingPicked(uri: Uri) {
+        deviceText.text = getString(R.string.sign_importing)
+        Thread {
+            val tmp = copyPickedPairing(uri)
+            val result = if (tmp == null) {
+                "ERR\nPAIRING\n無法讀取所選檔案"
+            } else {
+                try {
+                    nativeImportPairing(tmp.absolutePath, filesDir.absolutePath)
+                } catch (e: UnsatisfiedLinkError) {
+                    "ERR\nUNKNOWN\nRust core missing"
+                }
+            }
+            runOnUiThread { onPairingResult(result) }
+        }.start()
+    }
+
+    private fun copyPickedPairing(uri: Uri): File? {
+        val out = File(filesDir, "pairing_import.plist")
+        return try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                out.outputStream().use { output -> input.copyTo(output) }
+            } ?: return null
+            out
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun onPairingResult(result: String) {
+        val parts = result.split("\n", limit = 3)
+        when (parts[0]) {
+            "OK" -> {
+                val udid = parts.getOrElse(1) { "" }
+                val name = parts.getOrElse(2) { "" }
+                showPairing(udid, name)
+                Toast.makeText(this, getString(R.string.sign_import_ok), Toast.LENGTH_SHORT).show()
+                AppLog.write(filesDir, "簽名：已導入配對檔（裝置 …${udid.takeLast(6)}）")
+            }
+            else -> {
+                Toast.makeText(
+                    this,
+                    getString(R.string.sign_import_failed, parts.getOrElse(2) { "" }),
+                    Toast.LENGTH_LONG
+                ).show()
+                AppLog.write(filesDir, "簽名：導入配對檔失敗（${parts.getOrElse(1) { "?" }}）")
+                refreshPairingUi()
+            }
+        }
+    }
+
     // -- Picking & inspecting ----------------------------------------------
 
     private fun pickIpa() {
@@ -189,6 +309,7 @@ class SignActivity : Activity() {
         val uri = data?.data ?: return
         when (requestCode) {
             REQ_PICK_IPA -> onIpaPicked(uri)
+            REQ_PICK_PAIRING -> onPairingPicked(uri)
             REQ_SAVE_AS -> onSaveTargetChosen(uri)
         }
     }
@@ -294,6 +415,7 @@ class SignActivity : Activity() {
         busy = value
         progressBar.visibility = if (value) View.VISIBLE else View.GONE
         pickButton.isEnabled = !value
+        importButton.isEnabled = !value
         if (value) signButton.isEnabled = false
     }
 
@@ -307,7 +429,7 @@ class SignActivity : Activity() {
         saveButton.visibility = View.GONE
         signedFile = null
         resetStages()
-        applyStage("cert")
+        applyStage("device")
         AppLog.write(filesDir, "簽名：開始（$pickedBaseName）")
         Thread {
             val result = try {
@@ -344,6 +466,11 @@ class SignActivity : Activity() {
                 showCertLimit(result.substringAfter("\n", ""))
                 AppLog.write(filesDir, "簽名：因證書達上限停止（未撤銷任何證書）")
             }
+            "NODEVICE" -> {
+                failStage()
+                resultText.text = getString(R.string.sign_device_missing)
+                AppLog.write(filesDir, "簽名：未導入配對檔，停在裝置步")
+            }
             else -> {
                 failStage()
                 val parts = result.split("\n", limit = 3)
@@ -354,6 +481,7 @@ class SignActivity : Activity() {
                     "PANIC" -> getString(R.string.error_panic)
                     "NETWORK" -> getString(R.string.error_network)
                     "ANISETTE" -> getString(R.string.error_anisette, message)
+                    "PORTAL" -> getString(R.string.sign_failed_portal, message)
                     else -> getString(R.string.sign_failed, message)
                 }
                 AppLog.write(filesDir, "簽名：失敗（$code）")
@@ -431,6 +559,7 @@ class SignActivity : Activity() {
     companion object {
         private const val REQ_PICK_IPA = 4101
         private const val REQ_SAVE_AS = 4102
+        private const val REQ_PICK_PAIRING = 4103
 
         init {
             System.loadLibrary("ipaloader_core")

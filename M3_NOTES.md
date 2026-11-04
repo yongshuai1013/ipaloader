@@ -1,5 +1,32 @@
 # M3 Notes — 簽名（2026-11-04）
 
+## M3.1 補修（2026-11-05，versionCode 15 / 0.5.1）
+
+- 真機首驗：cert／appid 兩階段過，死在 profile 階段
+  DeveloperError(8220, "Your team has no devices from which to
+  generate a provisioning profile")——yiaoabb 團隊（ABPWV4MYHV）
+  未註冊任何裝置 UDID，M3 流程缺註冊裝置這一步
+- 修法（把 M4 的一小塊提前）：
+  - 裝置來源＝導入配對檔（v1 原定路線）：簽名頁新增「目標裝置」
+    區＋「導入配對檔」——Rust 以 plist crate 解析 lockdown 配對
+    plist（XML／binary 皆可），取 `UDID`（標準配對記錄無裝置名，
+    有 `DeviceName` 才帶），原檔存 `<filesDir>/pairing/
+    pairing.plist` 供 M4 連線用，UI 只顯示 UDID 後 8 碼
+  - 簽名流程在最前面新增「裝置」階段：無配對檔直接停步回
+    `NODEVICE`（不再讓 8220 原樣出現）；有則以 isideload
+    `DevicesApi`（listDevices／addDevice，QH65B2、iOS 段）先
+    list 比對、目標 UDID 不在才註冊（名稱＝配對檔裝置名，
+    無則 `ipaloader`），35 競態比照函式庫視同已註冊；註冊的
+    團隊與接著 `sign_app` 用的團隊以 `get_team()` 快取＋
+    `Some(team)` 明確傳入保證同一隊
+  - 錯誤分類修正（只限簽名路徑）：新增 `sign_err_string`——
+    從 report 因果鏈擷取 `SideloadError::DeveloperError` 回
+    `PORTAL`＋「錯誤碼：伺服器原文」；NETWORK 只留給真正的
+    傳輸失敗（reqwest send／DNS／逾時）。8220 先前被歸
+    NETWORK，是因為其訊息內含 "Connect" 與 "Certificates"
+    撞上通用啟發式關鍵字；登入路徑的 `classify` 不動
+- 證書硬規則未動（machineName／永不撤銷／CERTLIMIT 全沿用）
+
 ## 範圍
 
 - 已登入狀態下選 IPA → App 內完成簽名 → 產出可安裝的已簽 IPA，

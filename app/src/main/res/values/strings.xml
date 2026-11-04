@@ -67,6 +67,17 @@
 
     <string name="sign_open">簽名 IPA</string>
     <string name="sign_title">簽名 IPA</string>
+    <string name="sign_device_title">目標裝置</string>
+    <string name="sign_device_none">尚未導入配對檔——簽名前請先導入與 iPhone 配對產生的配對檔，簽名時會把這台裝置註冊到團隊。</string>
+    <string name="sign_device_info">%1$s（UDID …%2$s）</string>
+    <string name="sign_device_info_noname">UDID …%1$s</string>
+    <string name="sign_import_pairing">導入配對檔…</string>
+    <string name="sign_importing">正在讀取配對檔…</string>
+    <string name="sign_import_ok">已導入配對檔</string>
+    <string name="sign_import_failed">導入配對檔失敗：%1$s</string>
+    <string name="sign_stage_device">裝置（註冊到團隊）</string>
+    <string name="sign_device_missing">尚未導入配對檔，無法註冊目標裝置。請先點「導入配對檔」選取與 iPhone 配對產生的配對檔，再重新簽名。</string>
+    <string name="sign_failed_portal">Apple 開發者服務回報錯誤：%1$s</string>
     <string name="sign_pick">選擇 IPA…</string>
     <string name="sign_no_file">尚未選擇 IPA</string>
     <string name="sign_copying">正在複製 IPA…</string>
