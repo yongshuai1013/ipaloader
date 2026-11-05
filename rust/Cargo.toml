@@ -9,8 +9,8 @@ crate-type = ["cdylib"]
 [dependencies]
 jni = "0.21"
 isideload = { version = "0.5.2", default-features = false, features = ["fs-storage", "tokio-mt", "install"] }
-idevice = { version = "0.1.68", features = ["usbmuxd", "tcp"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+idevice = { version = "0.1.68", features = ["usbmuxd", "tcp", "pair"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 plist = "1.8"
 rootcause = "0.12"
 # isideload 0.5.2 builds its HTTP stack on reqwest's rustls-no-provider

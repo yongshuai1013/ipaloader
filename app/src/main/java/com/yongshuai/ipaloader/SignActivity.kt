@@ -56,6 +56,15 @@ class SignActivity(
     external fun nativeImportPairing(srcPath: String, filesDir: String): String
     external fun nativeGetPairing(filesDir: String): String
 
+    /**
+     * 0.6.3: pairs with the USB-connected device through
+     * [link] (bulk pipe to the usbmux interface) and stores
+     * the resulting pairing like an imported file. Blocking;
+     * call from a worker thread. "OK\n<udid>\n<name>" /
+     * "ERR\n<CODE>\n<message>".
+     */
+    external fun nativeUsbPair(link: UsbMuxLink, filesDir: String): String
+
     // Framework delegates so the flow code below reads unchanged.
     private val filesDir: File get() = host.filesDir
     private val contentResolver get() = host.contentResolver

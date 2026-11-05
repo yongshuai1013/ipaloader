@@ -997,12 +997,7 @@ fn do_import_pairing(src_path: &str, files_dir: &str) -> String {
         .and_then(|v| v.as_string())
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    let dir = pairing_dir(files_dir);
-    let writes = std::fs::create_dir_all(&dir)
-        .and_then(|_| std::fs::write(dir.join("pairing.plist"), &bytes))
-        .and_then(|_| std::fs::write(dir.join("udid.txt"), &udid))
-        .and_then(|_| std::fs::write(dir.join("name.txt"), &name));
-    if let Err(e) = writes {
+    if let Err(e) = store_pairing_files(files_dir, &bytes, &udid, &name) {
         return format!("ERR\nPAIRING\n配對檔儲存失敗：{}", e);
     }
     logf!("pairing imported: udid {}", mask_udid(&udid));
@@ -1011,6 +1006,26 @@ fn do_import_pairing(src_path: &str, files_dir: &str) -> String {
         udid.replace('\n', " "),
         name.replace('\n', " ")
     )
+}
+
+/// Write a pairing record plus its extracted identity as the
+/// stored target pairing: the three-file layout M3.1 created
+/// (`pairing.plist` + `udid.txt` + `name.txt` under
+/// `<filesDir>/pairing/`). Shared by the pairing-file import and
+/// by the in-app USB pairing flow (0.6.3), so both routes leave
+/// exactly the same stored state for the sign/install flows.
+fn store_pairing_files(
+    files_dir: &str,
+    bytes: &[u8],
+    udid: &str,
+    name: &str,
+) -> Result<(), std::io::Error> {
+    let dir = pairing_dir(files_dir);
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join("pairing.plist"), bytes)?;
+    std::fs::write(dir.join("udid.txt"), udid)?;
+    std::fs::write(dir.join("name.txt"), name)?;
+    Ok(())
 }
 
 fn do_pairing_info(files_dir: &str) -> String {
@@ -1662,3 +1677,5 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeListInven
 }
 
 mod install;
+mod usbpair;
+mod usbmux;

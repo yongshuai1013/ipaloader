@@ -11,8 +11,8 @@ android {
         applicationId = "com.yongshuai.ipaloader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 18
-        versionName = "0.6.2"
+        versionCode = 19
+        versionName = "0.6.3"
         ndk {
             abiFilters += "arm64-v8a"
         }
