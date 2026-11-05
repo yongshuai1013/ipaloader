@@ -42,7 +42,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use idevice::lockdown::LockdownClient;
 use idevice::pairing_file::PairingFile;
 use idevice::services::heartbeat::HeartbeatClient;
+use idevice::services::installation_proxy::InstallationProxyClient;
 use idevice::provider::TcpProvider;
+use idevice::{HeartbeatError, IdeviceError};
 use idevice::IdeviceService as _;
 use jni::objects::{GlobalRef, JObject, JString};
 use jni::sys::{jint, jstring};
@@ -446,6 +448,14 @@ fn extract_app_bundle(ipa_path: &str, work_root: &std::path::Path) -> Result<Pat
 /// The polo log lines (first three, then every tenth) let the
 /// next real-device log show whether the heartbeat stayed alive
 /// for the whole install.
+///
+/// 0.6.6: a Marco that does not arrive within the current
+/// interval is not fatal — during the installation phase the
+/// device is busy and its Marco can legitimately slip past the
+/// 10s the first exchange negotiated (the 0.6.5 run timed out
+/// once mid-install and the loop gave up). A typed
+/// HeartbeatError::Timeout now just logs and keeps waiting with
+/// the same interval; every other error still ends the loop.
 fn spawn_heartbeat(provider: TcpProvider) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut client = match HeartbeatClient::connect(&provider).await {
@@ -474,6 +484,10 @@ fn spawn_heartbeat(provider: TcpProvider) -> tokio::task::JoinHandle<()> {
                     }
                 }
                 Err(e) => {
+                    if matches!(e, IdeviceError::Heartbeat(HeartbeatError::Timeout)) {
+                        logf!("heartbeat: marco timeout, continuing");
+                        continue;
+                    }
                     logf!(
                         "heartbeat: marco failed after {} polos: {:?}",
                         count, e
@@ -483,6 +497,24 @@ fn spawn_heartbeat(provider: TcpProvider) -> tokio::task::JoinHandle<()> {
             }
         }
     })
+}
+
+/// 0.6.6: ask InstallationProxy whether a bundle id is already
+/// installed on the device (Lookup of just that one id, user
+/// apps only). Used to rescue the verdict when install_app's
+/// status stream drops mid-install: the 0.6.5 real-device run
+/// died at 82% with a bare TLS EOF on the status channel, yet
+/// installd finished the job and the app reached the home
+/// screen — a stream error is not proof the install failed.
+async fn app_installed_on_device(
+    provider: &TcpProvider,
+    bundle_id: &str,
+) -> Result<bool, IdeviceError> {
+    let mut client = InstallationProxyClient::connect(provider).await?;
+    let apps = client
+        .get_apps(Some("User"), Some(vec![bundle_id.to_string()]))
+        .await?;
+    Ok(apps.contains_key(bundle_id))
 }
 
 async fn do_install(
@@ -551,12 +583,14 @@ async fn do_install(
         isideload::sideload::install::install_app(&provider, &app_dir, progress),
     )
     .await;
-    // Every outcome lands here — success, device error and the
-    // 900s timeout alike — so the heartbeat stops exactly once.
-    heartbeat.abort();
-    logf!("install: heartbeat stopped");
-    let _ = std::fs::remove_dir_all(&work_root);
-    match result {
+    // 0.6.6: the verdict is computed first and the heartbeat is
+    // stopped afterwards — the device-error arm verifies with
+    // InstallationProxy while the heartbeat is still running
+    // (see app_installed_on_device). Every outcome — success,
+    // device error and the 900s timeout alike — still lands on
+    // the single abort below, so the heartbeat stops exactly
+    // once.
+    let text = match result {
         Ok(Ok(())) => {
             bridge.percent(100);
             logf!("install ok: {} installed on {}", bundle_id, found.ip);
@@ -570,20 +604,55 @@ async fn do_install(
         Ok(Err(report)) => {
             logf!("install failed: {:?}", report);
             let msg = short_line(&format!("{}", report));
-            format!(
+            let fallback = format!(
                 "ERR\nDEVICE\n{}",
                 if msg.is_empty() {
                     "裝置回報安裝失敗".to_string()
                 } else {
                     msg
                 }
-            )
+            );
+            // The error may only mean the status stream dropped
+            // while installd carried on (0.6.5: EOF at 82%, yet
+            // the app was installed). Verify before believing it.
+            let verify_provider = TcpProvider {
+                addr: provider.addr,
+                scope_id: provider.scope_id,
+                pairing_file: provider.pairing_file.clone(),
+                label: provider.label.clone(),
+            };
+            match app_installed_on_device(&verify_provider, &bundle_id).await {
+                Ok(true) => {
+                    bridge.percent(100);
+                    logf!(
+                        "install: stream dropped but app verified installed on device"
+                    );
+                    format!(
+                        "OK\n{}\n{}\n{}",
+                        found.ip,
+                        found.name.replace('\n', " "),
+                        found.version.replace('\n', " ")
+                    )
+                }
+                Ok(false) => {
+                    logf!("install: verification lookup: app not present");
+                    fallback
+                }
+                Err(e) => {
+                    logf!("install: verification lookup failed: {:?}", e);
+                    fallback
+                }
+            }
         }
         Err(_) => {
             logf!("install timed out");
             "ERR\nDEVICE\n安裝逾時（超過 15 分鐘），請確認 Wi-Fi 連線穩定後重試".to_string()
         }
-    }
+    };
+    heartbeat.abort();
+    logf!("install: heartbeat stopped");
+    let _ = std::fs::remove_dir_all(&work_root);
+    text
 }
 
 // ---------------------------------------------------------------------------
