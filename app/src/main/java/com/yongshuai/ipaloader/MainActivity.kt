@@ -32,6 +32,8 @@ class MainActivity : Activity() {
     external fun nativeRestoreSession(filesDir: String): String
     external fun nativeLogout(filesDir: String): Boolean
     external fun nativeListInventory(filesDir: String): String
+    external fun nativeExportSigningKey(filesDir: String, outPath: String): String
+    external fun nativeImportSigningKey(srcPath: String, filesDir: String): String
 
     private lateinit var statusText: TextView
     private lateinit var progressBar: ProgressBar
@@ -279,6 +281,9 @@ class MainActivity : Activity() {
         }
         if (::importPanel.isInitialized) {
             importPanel.onActivityResult(requestCode, resultCode, data)
+        }
+        if (::inventoryPanel.isInitialized) {
+            inventoryPanel.onActivityResult(requestCode, resultCode, data)
         }
     }
 

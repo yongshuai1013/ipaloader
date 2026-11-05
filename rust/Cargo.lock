@@ -1535,9 +1535,11 @@ dependencies = [
  "jni 0.22.4",
  "plist",
  "rootcause",
+ "rsa",
  "rustls",
  "rustls-platform-verifier",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "zip",
 ]

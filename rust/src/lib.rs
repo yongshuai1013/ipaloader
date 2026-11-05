@@ -1650,6 +1650,188 @@ async fn do_list_inventory(files_dir: String) -> String {
     )
 }
 
+// ---------------------------------------------------------------------------
+// 0.6.4: signing-key export/import. The portal certificate's RSA
+// private key lives only in this device's storage (isideload's
+// `CertificateIdentity::retrieve_private_key`: storage key
+// `{sha256(email) hex}/key` under `<filesDir>/core/`, raw PKCS#8
+// DER bytes). A second Android device therefore generates a fresh
+// key that cannot match the account's existing `ipaloader`
+// certificate, and Apple refuses a replacement with error 7460
+// even when the visible list is not full. Exporting the key on
+// the device that created the certificate and importing it on
+// the new device makes `find_matching` succeed there, so the
+// existing certificate is reused — nothing is created or revoked.
+// Both calls are synchronous and offline. The key bytes are never
+// logged and never shown; only a public-key fingerprint (first 16
+// hex chars of the SHA-256 of the public key's PKCS#1 DER) is.
+// ---------------------------------------------------------------------------
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
+}
+
+/// The storage key isideload's `retrieve_private_key` uses for an
+/// account's signing private key.
+fn signing_key_storage_key(email: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(email.as_bytes());
+    format!("{}/key", hex_lower(&digest))
+}
+
+/// Short public-key fingerprint for display/logging: first 16
+/// uppercase hex chars of the SHA-256 over the public key's
+/// PKCS#1 DER (the same DER `find_matching` compares against the
+/// portal certificate).
+fn signing_key_fingerprint(priv_key: &rsa::RsaPrivateKey) -> Option<String> {
+    use rsa::pkcs1::EncodeRsaPublicKey;
+    use sha2::Digest;
+    let der = priv_key.to_public_key().to_pkcs1_der().ok()?;
+    let digest = sha2::Sha256::digest(der.as_bytes());
+    Some(hex_lower(&digest)[..16].to_uppercase())
+}
+
+fn do_export_signing_key(files_dir: &str, out_path: &str) -> String {
+    use rsa::pkcs8::DecodePrivateKey;
+
+    let Some((email, _spd)) = load_session(files_dir) else {
+        logf!("key export: no saved session");
+        return "ERR\nNO_SESSION\n尚未登入，請先登入 Apple ID".to_string();
+    };
+    let storage = session_storage(files_dir);
+    let bytes = match storage.retrieve_data(&signing_key_storage_key(&email)) {
+        Ok(b) => b,
+        Err(e) => {
+            logf!("key export: storage read failed: {:?}", e);
+            return "ERR\nKEY\n讀取本機簽名私鑰失敗，請重試".to_string();
+        }
+    };
+    let Some(bytes) = bytes.filter(|b| !b.is_empty()) else {
+        logf!("key export: no signing key stored for {}", email);
+        return "ERR\nKEY\n本機尚無簽名私鑰：請先在本裝置完成一次簽名，或先從其他裝置導入"
+            .to_string();
+    };
+    let priv_key = match rsa::RsaPrivateKey::from_pkcs8_der(&bytes) {
+        Ok(k) => k,
+        Err(_) => {
+            logf!("key export: stored key for {} does not parse", email);
+            return "ERR\nKEY\n本機私鑰損壞無法解析".to_string();
+        }
+    };
+    let Some(fingerprint) = signing_key_fingerprint(&priv_key) else {
+        logf!("key export: fingerprint failed for {}", email);
+        return "ERR\nKEY\n本機私鑰損壞無法解析".to_string();
+    };
+    let mut dict = plist::Dictionary::new();
+    dict.insert(
+        "format".to_string(),
+        plist::Value::String("ipaloader-signing-key".to_string()),
+    );
+    dict.insert(
+        "version".to_string(),
+        plist::Value::Integer(1i64.into()),
+    );
+    dict.insert("email".to_string(), plist::Value::String(email.clone()));
+    dict.insert("key".to_string(), plist::Value::Data(bytes));
+    let value = plist::Value::Dictionary(dict);
+    let mut buf: Vec<u8> = Vec::new();
+    if let Err(e) = value.to_writer_xml(&mut buf) {
+        logf!("key export: plist encode failed: {}", e);
+        return "ERR\nKEY\n導出檔產生失敗，請重試".to_string();
+    }
+    let out = PathBuf::from(out_path);
+    if let Some(parent) = out.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&out, &buf) {
+        logf!("key export: write failed: {}", e);
+        return format!("ERR\nKEY\n導出檔寫入失敗：{}", e);
+    }
+    logf!(
+        "key export: signing key exported for {} fp {}",
+        email, fingerprint
+    );
+    format!(
+        "OK\n{}\n{}",
+        email.replace('\n', " "),
+        fingerprint
+    )
+}
+
+fn do_import_signing_key(src_path: &str, files_dir: &str) -> String {
+    use rsa::pkcs8::DecodePrivateKey;
+
+    let not_key_file =
+        "ERR\nKEY\n不是 ipaloader 簽名私鑰檔，請確認選的是導出的檔案".to_string();
+    let raw = match std::fs::read(src_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return format!("ERR\nKEY\n無法讀取所選檔案：{}", e);
+        }
+    };
+    let value = match plist::Value::from_reader(std::io::Cursor::new(&raw)) {
+        Ok(v) => v,
+        Err(_) => return not_key_file,
+    };
+    let plist::Value::Dictionary(dict) = value else {
+        return not_key_file;
+    };
+    let format_ok = dict.get("format").and_then(|v| v.as_string())
+        == Some("ipaloader-signing-key");
+    if !format_ok {
+        return not_key_file;
+    }
+    let email = dict
+        .get("email")
+        .and_then(|v| v.as_string())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if email.is_empty() || !email.contains('@') {
+        return not_key_file;
+    }
+    let der = dict
+        .get("key")
+        .and_then(|v| v.as_data())
+        .filter(|d| !d.is_empty())
+        .map(|d| d.to_vec());
+    let Some(der) = der else {
+        logf!("key import: file for {} carries no key data", email);
+        return "ERR\nKEY\n私鑰檔內容損壞，無法解析".to_string();
+    };
+    let priv_key = match rsa::RsaPrivateKey::from_pkcs8_der(&der) {
+        Ok(k) => k,
+        Err(_) => {
+            logf!("key import: key data for {} does not parse", email);
+            return "ERR\nKEY\n私鑰檔內容損壞，無法解析".to_string();
+        }
+    };
+    let Some(fingerprint) = signing_key_fingerprint(&priv_key) else {
+        logf!("key import: fingerprint failed for {}", email);
+        return "ERR\nKEY\n私鑰檔內容損壞，無法解析".to_string();
+    };
+    // Stored under the file's own account, not the currently
+    // logged-in one: the matching portal certificate belongs to
+    // that account.
+    let storage = session_storage(files_dir);
+    if let Err(e) = storage.store_data(&signing_key_storage_key(&email), &der) {
+        logf!("key import: storage write failed: {:?}", e);
+        return format!("ERR\nKEY\n私鑰儲存失敗：{}", e);
+    }
+    logf!(
+        "key import: signing key stored for {} fp {}",
+        email, fingerprint
+    );
+    format!(
+        "OK\n{}\n{}",
+        email.replace('\n', " "),
+        fingerprint
+    )
+}
+
 /// `external fun nativeListInventory(filesDir): String` in
 /// `com.yongshuai.ipaloader.MainActivity`. Blocking: run on a
 /// background thread.
@@ -1670,6 +1852,64 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeListInven
         Err(payload) => {
             let msg = panic_message(&*payload);
             logf!("nativeListInventory PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
+    make_jstring(&mut env, &text)
+}
+
+/// `external fun nativeExportSigningKey(filesDir, outPath): String`
+/// in `com.yongshuai.ipaloader.MainActivity` (0.6.4). Synchronous
+/// and offline; run on a background thread. Result:
+/// `OK\n<email>\n<fingerprint>` or `ERR\n<CODE>\n<message>`.
+#[no_mangle]
+pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeExportSigningKey(
+    mut env: JNIEnv,
+    this: JObject,
+    files_dir: JString,
+    out_path: JString,
+) -> jstring {
+    let files_dir = jstring_to_rust(&mut env, &files_dir);
+    let out_path = jstring_to_rust(&mut env, &out_path);
+    init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        do_export_signing_key(&files_dir, &out_path)
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeExportSigningKey PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
+    make_jstring(&mut env, &text)
+}
+
+/// `external fun nativeImportSigningKey(srcPath, filesDir): String`
+/// in `com.yongshuai.ipaloader.MainActivity` (0.6.4). Synchronous
+/// and offline; run on a background thread. Result:
+/// `OK\n<email>\n<fingerprint>` or `ERR\n<CODE>\n<message>`.
+#[no_mangle]
+pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeImportSigningKey(
+    mut env: JNIEnv,
+    this: JObject,
+    src_path: JString,
+    files_dir: JString,
+) -> jstring {
+    let src_path = jstring_to_rust(&mut env, &src_path);
+    let files_dir = jstring_to_rust(&mut env, &files_dir);
+    init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        do_import_signing_key(&src_path, &files_dir)
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeImportSigningKey PANIC caught: {}", msg);
             format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
         }
     };

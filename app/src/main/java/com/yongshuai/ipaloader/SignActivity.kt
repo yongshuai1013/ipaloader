@@ -429,7 +429,7 @@ class SignActivity(
             "CERTLIMIT" -> {
                 failStage()
                 showCertLimit(result.substringAfter("\n", ""))
-                AppLog.write(filesDir, "簽名：因證書達上限停止（未撤銷任何證書）")
+                AppLog.write(filesDir, "簽名：Apple 回 7460 無法建立證書（未撤銷任何證書）")
             }
             "NODEVICE" -> {
                 failStage()

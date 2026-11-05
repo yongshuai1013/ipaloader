@@ -100,8 +100,8 @@
     <string name="sign_saved">已另存</string>
     <string name="sign_no_session">登入已失效，請回主畫面重新登入後再試。</string>
     <string name="sign_failed">簽名失敗：%1$s</string>
-    <string name="sign_cert_limit_title">證書已達上限</string>
-    <string name="sign_cert_limit_body">免費帳號最多 2 張證書，目前已滿。ipaloader 不會自動撤銷任何證書——請先在其他工具（例如 EiliStore）手動撤銷一張不需要的證書，再回來重試。\n現有證書：</string>
+    <string name="sign_cert_limit_title">無法建立證書（Apple 7460）</string>
+    <string name="sign_cert_limit_body">Apple 回報無法再建立證書（錯誤 7460）：帳號已有有效的開發證書、或有待處理的證書請求時，即使清單未滿也會被拒。ipaloader 不會自動撤銷任何證書。\n若清單中的證書是在另一台裝置建立的（本機沒有它的私鑰），請到「證書・App ID」頁導入該裝置的簽名私鑰，即可直接複用該證書、不必撤銷。確定要改用本機新證書時，再在其他工具（例如 EiliStore）手動撤銷現有證書後回來重試。\n現有證書：</string>
     <string name="sign_cert_line">・%1$s（machineName：%2$s，到期：%3$s）</string>
     <string name="sign_install">安裝到 iPhone</string>
 
@@ -144,4 +144,14 @@
     <string name="inv_empty_appids">（沒有 App ID）</string>
     <string name="inv_appid_line">・%1$s（%2$s，到期：%3$s）</string>
     <string name="inv_failed">查詢失敗：%1$s</string>
+
+    <string name="key_title">簽名私鑰（跨裝置）</string>
+    <string name="key_hint">證書的私鑰只保存在本裝置。換安卓裝置時：先在舊裝置導出私鑰檔，傳到新裝置導入，即可直接複用帳號上原有的 ipaloader 證書，不必新建、也不必撤銷。導出檔含私鑰，請妥善保管、不要傳給他人。</string>
+    <string name="key_export">導出簽名私鑰</string>
+    <string name="key_import">導入簽名私鑰</string>
+    <string name="key_working">處理中…</string>
+    <string name="key_export_done">已導出簽名私鑰（帳號 %1$s，指紋 %2$s）。把檔案傳到新裝置，在該裝置的同一頁導入。</string>
+    <string name="key_import_done">已導入簽名私鑰（帳號 %1$s，指紋 %2$s）。之後簽名會直接複用該帳號原有的證書。</string>
+    <string name="key_import_confirm_title">導入簽名私鑰？</string>
+    <string name="key_import_confirm_body">將以檔案中的私鑰覆寫本機同一帳號目前的簽名私鑰。導入後，本機會改用該私鑰簽名（可複用另一台裝置建立的證書）。確定導入？</string>
 </resources>
