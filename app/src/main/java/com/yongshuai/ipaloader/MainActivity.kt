@@ -48,6 +48,7 @@ class MainActivity : Activity() {
     private lateinit var teamText: TextView
     private lateinit var logoutButton: Button
     private lateinit var signButton: Button
+    private lateinit var installButton: Button
     private lateinit var loginForm: LinearLayout
     private lateinit var accountBox: LinearLayout
     private lateinit var wispStatusText: TextView
@@ -120,12 +121,20 @@ class MainActivity : Activity() {
                 startActivity(Intent(this@MainActivity, SignActivity::class.java))
             }
         }
+        installButton = Button(this).apply {
+            text = getString(R.string.install_open)
+            setOnClickListener {
+                AppLog.write(filesDir, "開啟安裝頁")
+                startActivity(Intent(this@MainActivity, InstallActivity::class.java))
+            }
+        }
         accountBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
             addView(accountText)
             addView(teamText)
             addView(signButton)
+            addView(installButton)
             addView(logoutButton)
         }
 

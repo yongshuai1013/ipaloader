@@ -54,6 +54,7 @@ class SignActivity : Activity() {
     private lateinit var resultText: TextView
     private lateinit var limitText: TextView
     private lateinit var saveButton: Button
+    private lateinit var installToDeviceButton: Button
 
     private val stageOrder = listOf("device", "cert", "appid", "profile", "sign", "zip")
     private val stageLabels = LinkedHashMap<String, TextView>()
@@ -147,9 +148,22 @@ class SignActivity : Activity() {
             visibility = View.GONE
             setOnClickListener { saveSigned() }
         }
+        installToDeviceButton = Button(this).apply {
+            text = getString(R.string.sign_install)
+            visibility = View.GONE
+            setOnClickListener {
+                val file = signedFile ?: return@setOnClickListener
+                val intent = Intent(this@SignActivity, InstallActivity::class.java).apply {
+                    putExtra(InstallActivity.EXTRA_IPA_PATH, file.absolutePath)
+                    putExtra(InstallActivity.EXTRA_IPA_NAME, file.name)
+                }
+                startActivity(intent)
+            }
+        }
         layout.addView(resultText)
         layout.addView(limitText)
         layout.addView(saveButton)
+        layout.addView(installToDeviceButton)
 
         setContentView(layout)
         AppLog.write(filesDir, "開啟簽名頁")
@@ -321,6 +335,7 @@ class SignActivity : Activity() {
         resultText.text = ""
         limitText.visibility = View.GONE
         saveButton.visibility = View.GONE
+        installToDeviceButton.visibility = View.GONE
         signedFile = null
         resetStages()
         Thread {
@@ -427,6 +442,7 @@ class SignActivity : Activity() {
         resultText.text = getString(R.string.sign_working)
         limitText.visibility = View.GONE
         saveButton.visibility = View.GONE
+        installToDeviceButton.visibility = View.GONE
         signedFile = null
         resetStages()
         applyStage("device")
@@ -459,6 +475,7 @@ class SignActivity : Activity() {
                 }
                 resultText.text = text
                 saveButton.visibility = View.VISIBLE
+                installToDeviceButton.visibility = View.VISIBLE
                 AppLog.write(filesDir, "簽名：完成，描述檔到期 $expiry")
             }
             "CERTLIMIT" -> {

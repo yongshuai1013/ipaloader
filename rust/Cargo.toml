@@ -9,7 +9,7 @@ crate-type = ["cdylib"]
 [dependencies]
 jni = "0.21"
 isideload = { version = "0.5.2", default-features = false, features = ["fs-storage", "tokio-mt", "install"] }
-idevice = { version = "0.1.68", features = ["usbmuxd"] }
+idevice = { version = "0.1.68", features = ["usbmuxd", "tcp"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 plist = "1.8"
 rootcause = "0.12"

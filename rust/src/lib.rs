@@ -1713,3 +1713,5 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeGetPairin
     };
     make_jstring(&mut env, &text)
 }
+
+mod install;

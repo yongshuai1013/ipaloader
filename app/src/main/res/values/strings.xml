@@ -104,4 +104,26 @@
     <string name="sign_cert_limit_title">證書已達上限</string>
     <string name="sign_cert_limit_body">免費帳號最多 2 張證書，目前已滿。ipaloader 不會自動撤銷任何證書——請先在其他工具（例如 EiliStore）手動撤銷一張不需要的證書，再回來重試。\n現有證書：</string>
     <string name="sign_cert_line">・%1$s（machineName：%2$s，到期：%3$s）</string>
+    <string name="sign_install">安裝到 iPhone</string>
+
+    <string name="install_open">安裝 IPA</string>
+    <string name="install_title">安裝 IPA</string>
+    <string name="install_device_none">尚未導入配對檔——安裝前請先導入與 iPhone 配對產生的配對檔。</string>
+    <string name="install_conn_title">裝置連線</string>
+    <string name="install_conn_unknown">尚未檢查連線</string>
+    <string name="install_probe">檢查連線</string>
+    <string name="install_probing">正在區網內尋找 iPhone…</string>
+    <string name="install_conn_ok">已連線：%1$s（iOS %2$s，%3$s）</string>
+    <string name="install_conn_failed">連線失敗</string>
+    <string name="install_notfound">找不到 iPhone：請確認與手機連同一個 Wi-Fi、iPhone 已喚醒並解鎖、且已開啟「透過 Wi-Fi 同步」，再點「檢查連線」重試。</string>
+    <string name="install_no_wifi">無法取得手機的 Wi-Fi 位址，請先連上 Wi-Fi 再試。</string>
+    <string name="install_pick">選擇已簽名 IPA…</string>
+    <string name="install_no_file">尚未選擇 IPA</string>
+    <string name="install_file_info">已選：%1$s</string>
+    <string name="install_start">開始安裝</string>
+    <string name="install_working">安裝中…（先尋找裝置，再上傳並安裝）</string>
+    <string name="install_progress">%1$d%%</string>
+    <string name="install_done">安裝完成：已裝到 %1$s（iOS %2$s）。請到 iPhone 上開啟這個 App 確認。</string>
+    <string name="install_device_missing">尚未導入配對檔，無法安裝。請先點「導入配對檔」選取與 iPhone 配對產生的配對檔。</string>
+    <string name="install_failed">安裝失敗：%1$s</string>
 </resources>
