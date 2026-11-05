@@ -110,4 +110,23 @@
     <string name="install_done">安裝完成：已裝到 %1$s（iOS %2$s）。請到 iPhone 上開啟這個 App 確認。</string>
     <string name="install_device_missing">尚未導入配對檔，無法安裝。請先點「導入配對檔」選取與 iPhone 配對產生的配對檔。</string>
     <string name="install_failed">安裝失敗：%1$s</string>
+
+    <string name="tab_sign">簽名</string>
+    <string name="tab_install">安裝</string>
+    <string name="tab_pairing">配對</string>
+    <string name="tab_import">導入 IPA</string>
+    <string name="tab_inventory">證書・App ID</string>
+
+    <string name="import_to_sign">送去簽名</string>
+    <string name="import_to_install">送去安裝</string>
+
+    <string name="inv_refresh">查詢證書與 App ID</string>
+    <string name="inv_hint">尚未查詢</string>
+    <string name="inv_loading">查詢中…</string>
+    <string name="inv_certs_title">證書</string>
+    <string name="inv_appids_title">App ID</string>
+    <string name="inv_empty_certs">（沒有證書）</string>
+    <string name="inv_empty_appids">（沒有 App ID）</string>
+    <string name="inv_appid_line">・%1$s（%2$s，到期：%3$s）</string>
+    <string name="inv_failed">查詢失敗：%1$s</string>
 </resources>

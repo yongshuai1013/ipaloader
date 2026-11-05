@@ -1,17 +1,16 @@
 package com.yongshuai.ipaloader
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Uri
-import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
-import android.widget.Toast
 import java.io.File
 import java.net.Inet4Address
 
@@ -25,12 +24,23 @@ import java.net.Inet4Address
  * reports its name / iOS version, and installs through isideload's
  * AFC + InstallationProxy flow with percent progress.
  *
- * Two entries lead here: the standalone "安裝 IPA" button on the
- * main screen (pick any signed IPA), and the sign page's
- * 「安裝到 iPhone」 button after a successful sign (the fresh IPA
- * arrives pre-picked through an intent extra).
+ * Entries: the install tab itself (pick any signed IPA), the
+ * sign tab's 「安裝到 iPhone」 button after a successful sign, and
+ * the import tab — the latter two hand the IPA over pre-picked
+ * through [prePick].
+ *
+ * 0.6.2: this class is no longer an Activity — it is the install
+ * tab's panel, hosted by MainActivity. The class name is unchanged
+ * because the Rust core's JNI symbols (and its progress callbacks,
+ * which are delivered to the calling object) are bound to it.
+ * Framework access goes through [host]. The pairing-file import
+ * block that used to head this page now lives in the pairing tab
+ * (PairingPanel); the probe below reads the stored pairing
+ * through the core exactly as before.
  */
-class InstallActivity : Activity() {
+class InstallActivity(
+    private val host: Activity
+) {
 
     external fun nativeProbeDevice(phoneIp: String, prefixLen: Int, filesDir: String): String
     external fun nativeInstallIpa(
@@ -39,11 +49,21 @@ class InstallActivity : Activity() {
         prefixLen: Int,
         filesDir: String
     ): String
-    external fun nativeImportPairing(srcPath: String, filesDir: String): String
-    external fun nativeGetPairing(filesDir: String): String
 
-    private lateinit var deviceText: TextView
-    private lateinit var importButton: Button
+    // Framework delegates so the flow code below reads unchanged.
+    private val filesDir: File get() = host.filesDir
+    private val contentResolver get() = host.contentResolver
+    private fun getString(resId: Int, vararg formatArgs: Any): String =
+        host.getString(resId, *formatArgs)
+
+    private fun runOnUiThread(action: () -> Unit) {
+        host.runOnUiThread(action)
+    }
+
+    private fun startActivityForResult(intent: Intent, requestCode: Int) {
+        host.startActivityForResult(intent, requestCode)
+    }
+
     private lateinit var connText: TextView
     private lateinit var probeButton: Button
     private lateinit var pickButton: Button
@@ -56,56 +76,43 @@ class InstallActivity : Activity() {
     private var pickedFile: File? = null
     private var busy = false
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        title = getString(R.string.install_title)
+    /** The panel's view hierarchy, built once and kept by the host. */
+    val root: View
 
-        val layout = LinearLayout(this).apply {
+    init {
+        val layout = LinearLayout(host).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 32)
         }
 
-        val deviceTitle = TextView(this).apply {
-            textSize = 16f
-            text = getString(R.string.sign_device_title)
-        }
-        deviceText = TextView(this).apply {
-            textSize = 15f
-            text = getString(R.string.install_device_none)
-        }
-        importButton = Button(this).apply {
-            text = getString(R.string.sign_import_pairing)
-            setOnClickListener { pickPairing() }
-        }
-
-        val connTitle = TextView(this).apply {
+        val connTitle = TextView(host).apply {
             textSize = 16f
             setPadding(0, 32, 0, 0)
             text = getString(R.string.install_conn_title)
         }
-        connText = TextView(this).apply {
+        connText = TextView(host).apply {
             textSize = 15f
             text = getString(R.string.install_conn_unknown)
         }
-        probeButton = Button(this).apply {
+        probeButton = Button(host).apply {
             text = getString(R.string.install_probe)
             setOnClickListener { startProbe() }
         }
 
-        pickButton = Button(this).apply {
+        pickButton = Button(host).apply {
             text = getString(R.string.install_pick)
             setOnClickListener { pickIpa() }
         }
-        fileText = TextView(this).apply {
+        fileText = TextView(host).apply {
             textSize = 15f
             text = getString(R.string.install_no_file)
         }
-        installButton = Button(this).apply {
+        installButton = Button(host).apply {
             text = getString(R.string.install_start)
             isEnabled = false
             setOnClickListener { startInstall() }
         }
-        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+        progressBar = ProgressBar(host, null, android.R.attr.progressBarStyleHorizontal)
             .apply {
                 max = 100
                 progress = 0
@@ -115,18 +122,15 @@ class InstallActivity : Activity() {
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 )
             }
-        percentText = TextView(this).apply {
+        percentText = TextView(host).apply {
             textSize = 15f
             visibility = View.GONE
         }
-        resultText = TextView(this).apply {
+        resultText = TextView(host).apply {
             textSize = 15f
             setPadding(0, 32, 0, 0)
         }
 
-        layout.addView(deviceTitle)
-        layout.addView(deviceText)
-        layout.addView(importButton)
         layout.addView(connTitle)
         layout.addView(connText)
         layout.addView(probeButton)
@@ -136,26 +140,29 @@ class InstallActivity : Activity() {
         layout.addView(progressBar)
         layout.addView(percentText)
         layout.addView(resultText)
-        setContentView(layout)
 
+        root = layout
+    }
+
+    private var opened = false
+
+    /** First-display hook, mirroring the old page-open behavior. */
+    fun onFirstShown() {
+        if (opened) return
+        opened = true
         AppLog.write(filesDir, "開啟安裝頁")
-        // Pre-picked IPA from the sign page ("install right after
-        // signing") — the file already lives in app storage.
-        val prePath = intent.getStringExtra(EXTRA_IPA_PATH)
-        if (!prePath.isNullOrEmpty()) {
-            val f = File(prePath)
-            if (f.isFile) {
-                pickedFile = f
-                fileText.text = getString(
-                    R.string.install_file_info,
-                    intent.getStringExtra(EXTRA_IPA_NAME) ?: f.name
-                )
-                installButton.isEnabled = true
-                AppLog.write(filesDir, "安裝：帶入剛簽好的 IPA（${f.name}）")
-            }
-        }
-        refreshPairingUi()
         startProbe()
+    }
+
+    /**
+     * IPA handed over pre-picked (the sign tab's fresh output, or
+     * the import tab) — the file already lives in app storage.
+     */
+    fun prePick(file: File, displayName: String) {
+        pickedFile = file
+        fileText.text = getString(R.string.install_file_info, displayName)
+        installButton.isEnabled = true
+        AppLog.write(filesDir, "安裝：帶入 IPA（${file.name}）")
     }
 
     // -- Local subnet -----------------------------------------------------
@@ -163,7 +170,7 @@ class InstallActivity : Activity() {
     /** The phone's own Wi-Fi IPv4 address + prefix length, if any. */
     private fun localSubnet(): Pair<String, Int>? {
         try {
-            val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            val cm = host.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val network = cm.activeNetwork ?: return null
             val props = cm.getLinkProperties(network) ?: return null
             for (la in props.linkAddresses) {
@@ -183,92 +190,7 @@ class InstallActivity : Activity() {
         busy = value
         probeButton.isEnabled = !value
         pickButton.isEnabled = !value
-        importButton.isEnabled = !value
         installButton.isEnabled = !value && pickedFile != null
-    }
-
-    // -- Target device (pairing file) -------------------------------------
-
-    private fun refreshPairingUi() {
-        Thread {
-            val result = try {
-                nativeGetPairing(filesDir.absolutePath)
-            } catch (e: UnsatisfiedLinkError) {
-                "NONE"
-            }
-            runOnUiThread {
-                val parts = result.split("\n", limit = 3)
-                if (parts[0] == "OK") {
-                    val udid = parts.getOrElse(1) { "" }
-                    val name = parts.getOrElse(2) { "" }
-                    val tail = udid.takeLast(8)
-                    deviceText.text = if (name.isNotEmpty()) {
-                        getString(R.string.sign_device_info, name, tail)
-                    } else {
-                        getString(R.string.sign_device_info_noname, tail)
-                    }
-                } else {
-                    deviceText.text = getString(R.string.install_device_none)
-                }
-            }
-        }.start()
-    }
-
-    private fun pickPairing() {
-        if (busy) return
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-        }
-        startActivityForResult(intent, REQ_PICK_PAIRING)
-    }
-
-    private fun onPairingPicked(uri: Uri) {
-        deviceText.text = getString(R.string.sign_importing)
-        Thread {
-            val tmp = copyPickedPairing(uri)
-            val result = if (tmp == null) {
-                "ERR\nPAIRING\n無法讀取所選檔案"
-            } else {
-                try {
-                    nativeImportPairing(tmp.absolutePath, filesDir.absolutePath)
-                } catch (e: UnsatisfiedLinkError) {
-                    "ERR\nUNKNOWN\nRust core missing"
-                }
-            }
-            runOnUiThread {
-                onPairingResult(result)
-                startProbe()
-            }
-        }.start()
-    }
-
-    private fun copyPickedPairing(uri: Uri): File? {
-        val out = File(filesDir, "pairing_import.plist")
-        return try {
-            contentResolver.openInputStream(uri)?.use { input ->
-                out.outputStream().use { output -> input.copyTo(output) }
-            } ?: return null
-            out
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun onPairingResult(result: String) {
-        val parts = result.split("\n", limit = 3)
-        if (parts[0] == "OK") {
-            val udid = parts.getOrElse(1) { "" }
-            Toast.makeText(this, getString(R.string.sign_import_ok), Toast.LENGTH_SHORT).show()
-            AppLog.write(filesDir, "安裝：已導入配對檔（裝置 …${udid.takeLast(6)}）")
-        } else {
-            Toast.makeText(
-                this,
-                getString(R.string.sign_import_failed, parts.getOrElse(2) { "" }),
-                Toast.LENGTH_LONG
-            ).show()
-        }
-        refreshPairingUi()
     }
 
     // -- Connection probe ---------------------------------------------------
@@ -334,13 +256,12 @@ class InstallActivity : Activity() {
         startActivityForResult(intent, REQ_PICK_IPA)
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK) return
+    /** Picker results, forwarded by the host activity. */
+    fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (resultCode != Activity.RESULT_OK) return
         val uri = data?.data ?: return
         when (requestCode) {
             REQ_PICK_IPA -> onIpaPicked(uri)
-            REQ_PICK_PAIRING -> onPairingPicked(uri)
         }
     }
 
@@ -465,11 +386,7 @@ class InstallActivity : Activity() {
     }
 
     companion object {
-        const val EXTRA_IPA_PATH = "ipa_path"
-        const val EXTRA_IPA_NAME = "ipa_name"
-
         private const val REQ_PICK_IPA = 4201
-        private const val REQ_PICK_PAIRING = 4202
 
         init {
             System.loadLibrary("ipaloader_core")

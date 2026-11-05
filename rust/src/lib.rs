@@ -1526,4 +1526,139 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeGetPairin
     make_jstring(&mut env, &text)
 }
 
+// ---------------------------------------------------------------------------
+// 0.6.2: portal inventory view (certificates + App IDs) for the
+// main screen's inventory tab. Read-only: the session is restored
+// exactly the way `do_sign` restores it, then the same portal list
+// calls the sign flow itself uses (`list_ios_certs`,
+// `list_app_ids`) run against the first team. Nothing is created,
+// revoked or deleted here. Result protocol:
+// `OK\n<team name>\n<certificates JSON>\n<app ids JSON>`, or the
+// sign flow's error strings (`ERR\nNO_SESSION\n…`, PORTAL, …).
+// ---------------------------------------------------------------------------
+
+async fn do_list_inventory(files_dir: String) -> String {
+    use isideload::dev::app_ids::AppIdsApi;
+    use isideload::dev::certificates::CertificatesApi;
+
+    let Some((email, spd)) = load_session(&files_dir) else {
+        logf!("inventory: no saved session");
+        return "ERR\nNO_SESSION\n尚未登入，請先登入 Apple ID".to_string();
+    };
+    let provider = match anisette_provider(&files_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            logf!("inventory: anisette provider failed: {:?}", e);
+            return sign_err_string(&e);
+        }
+    };
+    let mut account = match AppleAccountBuilder::new(&email)
+        .anisette_provider(provider)
+        .build()
+        .await
+    {
+        Ok(a) => a,
+        Err(e) => {
+            logf!("inventory: account build failed: {:?}", e);
+            return sign_err_string(&e);
+        }
+    };
+    account.spd = Some(spd);
+    let mut session = match DeveloperSession::from_account(&mut account).await {
+        Ok(s) => s,
+        Err(e) => {
+            logf!("inventory: developer session failed: {:?}", e);
+            return sign_err_string(&e);
+        }
+    };
+    let teams = match session.list_teams().await {
+        Ok(t) => t,
+        Err(e) => {
+            logf!("inventory: list teams failed: {:?}", e);
+            return sign_err_string(&e);
+        }
+    };
+    let Some(team) = teams.into_iter().next() else {
+        logf!("inventory: no teams");
+        return "ERR\nPORTAL\n找不到開發者團隊".to_string();
+    };
+    let team_name = team.name.clone().unwrap_or_default();
+    let certs = match session.list_ios_certs(&team).await {
+        Ok(c) => c,
+        Err(e) => {
+            logf!("inventory: list certs failed: {:?}", e);
+            return sign_err_string(&e);
+        }
+    };
+    let cert_count = certs.len();
+    let certs_json = {
+        let summaries: Vec<CertSummary> = certs.iter().map(cert_summary).collect();
+        cert_limit_json(&summaries)
+    };
+    let app_ids = match session.list_app_ids(&team, None).await {
+        Ok(r) => r,
+        Err(e) => {
+            logf!("inventory: list app ids failed: {:?}", e);
+            return sign_err_string(&e);
+        }
+    };
+    let app_id_count = app_ids.app_ids.len();
+    let app_ids_json = {
+        let list: Vec<serde_json::Value> = app_ids
+            .app_ids
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "name": a.name,
+                    "identifier": a.identifier,
+                    "expires": a
+                        .expiration_date
+                        .as_ref()
+                        .map(|d| d.to_xml_format())
+                        .unwrap_or_default(),
+                })
+            })
+            .collect();
+        serde_json::Value::Array(list).to_string()
+    };
+    logf!(
+        "inventory: {} cert(s), {} app id(s) on team {}",
+        cert_count,
+        app_id_count,
+        team.team_id
+    );
+    format!(
+        "OK\n{}\n{}\n{}",
+        team_name.replace('\n', " "),
+        certs_json,
+        app_ids_json
+    )
+}
+
+/// `external fun nativeListInventory(filesDir): String` in
+/// `com.yongshuai.ipaloader.MainActivity`. Blocking: run on a
+/// background thread.
+#[no_mangle]
+pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeListInventory(
+    mut env: JNIEnv,
+    this: JObject,
+    files_dir: JString,
+) -> jstring {
+    let files_dir = jstring_to_rust(&mut env, &files_dir);
+    init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime().block_on(do_list_inventory(files_dir))
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeListInventory PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
+    make_jstring(&mut env, &text)
+}
+
 mod install;

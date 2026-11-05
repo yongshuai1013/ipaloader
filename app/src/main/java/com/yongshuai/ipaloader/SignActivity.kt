@@ -3,7 +3,6 @@ package com.yongshuai.ipaloader
 import android.app.Activity
 import android.content.Intent
 import android.net.Uri
-import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.View
 import android.widget.Button
@@ -37,16 +36,40 @@ import java.util.TimeZone
  * device / cert / appid / profile / sign / zip. A certificate-limit
  * stop comes back as a CERTLIMIT result carrying the existing
  * certificates; nothing is ever revoked automatically.
+ *
+ * 0.6.2: this class is no longer an Activity — it is the sign tab's
+ * panel, hosted by MainActivity. The class name is unchanged
+ * because the Rust core's JNI symbols (and its progress callbacks,
+ * which are delivered to the calling object) are bound to it.
+ * Framework access goes through [host]. The pairing-file import
+ * block that used to head this page now lives in the pairing tab
+ * (PairingPanel), which reaches the stored pairing through this
+ * class's [nativeImportPairing] / [nativeGetPairing].
  */
-class SignActivity : Activity() {
+class SignActivity(
+    private val host: Activity,
+    private val onInstallRequested: (File) -> Unit
+) {
 
     external fun nativeInspectIpa(ipaPath: String, filesDir: String): String
     external fun nativeSignIpa(ipaPath: String, outPath: String, filesDir: String): String
     external fun nativeImportPairing(srcPath: String, filesDir: String): String
     external fun nativeGetPairing(filesDir: String): String
 
-    private lateinit var deviceText: TextView
-    private lateinit var importButton: Button
+    // Framework delegates so the flow code below reads unchanged.
+    private val filesDir: File get() = host.filesDir
+    private val contentResolver get() = host.contentResolver
+    private fun getString(resId: Int, vararg formatArgs: Any): String =
+        host.getString(resId, *formatArgs)
+
+    private fun runOnUiThread(action: () -> Unit) {
+        host.runOnUiThread(action)
+    }
+
+    private fun startActivityForResult(intent: Intent, requestCode: Int) {
+        host.startActivityForResult(intent, requestCode)
+    }
+
     private lateinit var pickButton: Button
     private lateinit var infoText: TextView
     private lateinit var signButton: Button
@@ -66,51 +89,35 @@ class SignActivity : Activity() {
     private var signedFile: File? = null
     private var busy = false
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        title = getString(R.string.sign_title)
+    /** The panel's view hierarchy, built once and kept by the host. */
+    val root: View
 
-        val layout = LinearLayout(this).apply {
+    init {
+        val layout = LinearLayout(host).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 32, 32, 32)
         }
 
-        val deviceTitle = TextView(this).apply {
-            textSize = 16f
-            text = getString(R.string.sign_device_title)
-        }
-        deviceText = TextView(this).apply {
-            textSize = 15f
-            text = getString(R.string.sign_device_none)
-        }
-        importButton = Button(this).apply {
-            text = getString(R.string.sign_import_pairing)
-            setOnClickListener { pickPairing() }
-        }
-
-        pickButton = Button(this).apply {
+        pickButton = Button(host).apply {
             text = getString(R.string.sign_pick)
             setOnClickListener { pickIpa() }
         }
-        infoText = TextView(this).apply {
+        infoText = TextView(host).apply {
             textSize = 15f
             text = getString(R.string.sign_no_file)
         }
-        signButton = Button(this).apply {
+        signButton = Button(host).apply {
             text = getString(R.string.sign_start)
             isEnabled = false
             setOnClickListener { startSign() }
         }
-        progressBar = ProgressBar(this).apply { visibility = View.GONE }
+        progressBar = ProgressBar(host).apply { visibility = View.GONE }
 
-        val stageTitle = TextView(this).apply {
+        val stageTitle = TextView(host).apply {
             textSize = 16f
             setPadding(0, 32, 0, 8)
             text = getString(R.string.sign_stages_title)
         }
-        layout.addView(deviceTitle)
-        layout.addView(deviceText)
-        layout.addView(importButton)
         layout.addView(pickButton)
         layout.addView(infoText)
         layout.addView(signButton)
@@ -125,7 +132,7 @@ class SignActivity : Activity() {
             "zip" to R.string.sign_stage_zip
         )
         for (key in stageOrder) {
-            val tv = TextView(this).apply { textSize = 15f }
+            val tv = TextView(host).apply { textSize = 15f }
             stageLabels[key] = tv
             layout.addView(tv)
         }
@@ -134,30 +141,26 @@ class SignActivity : Activity() {
         }
         resetStages()
 
-        resultText = TextView(this).apply {
+        resultText = TextView(host).apply {
             textSize = 15f
             setPadding(0, 32, 0, 0)
         }
-        limitText = TextView(this).apply {
+        limitText = TextView(host).apply {
             textSize = 15f
             setPadding(0, 32, 0, 0)
             visibility = View.GONE
         }
-        saveButton = Button(this).apply {
+        saveButton = Button(host).apply {
             text = getString(R.string.sign_save_as)
             visibility = View.GONE
             setOnClickListener { saveSigned() }
         }
-        installToDeviceButton = Button(this).apply {
+        installToDeviceButton = Button(host).apply {
             text = getString(R.string.sign_install)
             visibility = View.GONE
             setOnClickListener {
                 val file = signedFile ?: return@setOnClickListener
-                val intent = Intent(this@SignActivity, InstallActivity::class.java).apply {
-                    putExtra(InstallActivity.EXTRA_IPA_PATH, file.absolutePath)
-                    putExtra(InstallActivity.EXTRA_IPA_NAME, file.name)
-                }
-                startActivity(intent)
+                onInstallRequested(file)
             }
         }
         layout.addView(resultText)
@@ -165,9 +168,16 @@ class SignActivity : Activity() {
         layout.addView(saveButton)
         layout.addView(installToDeviceButton)
 
-        setContentView(layout)
+        root = layout
+    }
+
+    private var opened = false
+
+    /** First-display hook, mirroring the old page-open behavior. */
+    fun onFirstShown() {
+        if (opened) return
+        opened = true
         AppLog.write(filesDir, "開啟簽名頁")
-        refreshPairingUi()
     }
 
     // -- Stage checklist ---------------------------------------------------
@@ -216,96 +226,6 @@ class SignActivity : Activity() {
         runOnUiThread { applyStage(stage) }
     }
 
-    // -- Target device (pairing file) ----------------------------------------
-
-    private fun refreshPairingUi() {
-        Thread {
-            val result = try {
-                nativeGetPairing(filesDir.absolutePath)
-            } catch (e: UnsatisfiedLinkError) {
-                "NONE"
-            }
-            runOnUiThread {
-                val parts = result.split("\n", limit = 3)
-                if (parts[0] == "OK") {
-                    showPairing(parts.getOrElse(1) { "" }, parts.getOrElse(2) { "" })
-                } else {
-                    deviceText.text = getString(R.string.sign_device_none)
-                }
-            }
-        }.start()
-    }
-
-    /** Shows the stored target device: name (if any) + UDID tail. */
-    private fun showPairing(udid: String, name: String) {
-        val tail = udid.takeLast(8)
-        deviceText.text = if (name.isNotEmpty()) {
-            getString(R.string.sign_device_info, name, tail)
-        } else {
-            getString(R.string.sign_device_info_noname, tail)
-        }
-    }
-
-    private fun pickPairing() {
-        if (busy) return
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-        }
-        startActivityForResult(intent, REQ_PICK_PAIRING)
-    }
-
-    private fun onPairingPicked(uri: Uri) {
-        deviceText.text = getString(R.string.sign_importing)
-        Thread {
-            val tmp = copyPickedPairing(uri)
-            val result = if (tmp == null) {
-                "ERR\nPAIRING\n無法讀取所選檔案"
-            } else {
-                try {
-                    nativeImportPairing(tmp.absolutePath, filesDir.absolutePath)
-                } catch (e: UnsatisfiedLinkError) {
-                    "ERR\nUNKNOWN\nRust core missing"
-                }
-            }
-            runOnUiThread { onPairingResult(result) }
-        }.start()
-    }
-
-    private fun copyPickedPairing(uri: Uri): File? {
-        val out = File(filesDir, "pairing_import.plist")
-        return try {
-            contentResolver.openInputStream(uri)?.use { input ->
-                out.outputStream().use { output -> input.copyTo(output) }
-            } ?: return null
-            out
-        } catch (e: Exception) {
-            null
-        }
-    }
-
-    private fun onPairingResult(result: String) {
-        val parts = result.split("\n", limit = 3)
-        when (parts[0]) {
-            "OK" -> {
-                val udid = parts.getOrElse(1) { "" }
-                val name = parts.getOrElse(2) { "" }
-                showPairing(udid, name)
-                Toast.makeText(this, getString(R.string.sign_import_ok), Toast.LENGTH_SHORT).show()
-                AppLog.write(filesDir, "簽名：已導入配對檔（裝置 …${udid.takeLast(6)}）")
-            }
-            else -> {
-                Toast.makeText(
-                    this,
-                    getString(R.string.sign_import_failed, parts.getOrElse(2) { "" }),
-                    Toast.LENGTH_LONG
-                ).show()
-                AppLog.write(filesDir, "簽名：導入配對檔失敗（${parts.getOrElse(1) { "?" }}）")
-                refreshPairingUi()
-            }
-        }
-    }
-
     // -- Picking & inspecting ----------------------------------------------
 
     private fun pickIpa() {
@@ -317,15 +237,35 @@ class SignActivity : Activity() {
         startActivityForResult(intent, REQ_PICK_IPA)
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode != RESULT_OK) return
+    /** Picker results, forwarded by the host activity. */
+    fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (resultCode != Activity.RESULT_OK) return
         val uri = data?.data ?: return
         when (requestCode) {
             REQ_PICK_IPA -> onIpaPicked(uri)
-            REQ_PICK_PAIRING -> onPairingPicked(uri)
             REQ_SAVE_AS -> onSaveTargetChosen(uri)
         }
+    }
+
+    /**
+     * IPA handed over by the import tab (already copied into app
+     * storage). Mirrors the post-copy half of [onIpaPicked].
+     */
+    fun acceptExternalIpa(file: File) {
+        setBusy(true)
+        infoText.text = getString(R.string.sign_copying)
+        signButton.isEnabled = false
+        resultText.text = ""
+        limitText.visibility = View.GONE
+        saveButton.visibility = View.GONE
+        installToDeviceButton.visibility = View.GONE
+        signedFile = null
+        resetStages()
+        pickedBaseName = file.name.removeSuffix(".ipa").removeSuffix(".IPA")
+        if (pickedBaseName.isEmpty()) pickedBaseName = "app"
+        pickedFile = file
+        AppLog.write(filesDir, "簽名：由導入頁帶入 IPA ${file.name}（${file.length()} bytes）")
+        inspect(file)
     }
 
     private fun onIpaPicked(uri: Uri) {
@@ -430,7 +370,6 @@ class SignActivity : Activity() {
         busy = value
         progressBar.visibility = if (value) View.VISIBLE else View.GONE
         pickButton.isEnabled = !value
-        importButton.isEnabled = !value
         if (value) signButton.isEnabled = false
     }
 
@@ -566,7 +505,7 @@ class SignActivity : Activity() {
             }
             runOnUiThread {
                 if (ok) {
-                    Toast.makeText(this, getString(R.string.sign_saved), Toast.LENGTH_SHORT).show()
+                    Toast.makeText(host, getString(R.string.sign_saved), Toast.LENGTH_SHORT).show()
                     AppLog.write(filesDir, "簽名：已另存已簽 IPA")
                 }
             }
@@ -576,7 +515,7 @@ class SignActivity : Activity() {
     companion object {
         private const val REQ_PICK_IPA = 4101
         private const val REQ_SAVE_AS = 4102
-        private const val REQ_PICK_PAIRING = 4103
+
 
         init {
             System.loadLibrary("ipaloader_core")

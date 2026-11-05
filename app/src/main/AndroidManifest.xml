@@ -19,12 +19,10 @@
         <activity
             android:name=".LogActivity"
             android:exported="false" />
-        <activity
-            android:name=".SignActivity"
-            android:exported="false" />
-        <activity
-            android:name=".InstallActivity"
-            android:exported="false" />
+        <!-- SignActivity / InstallActivity are tab panels hosted by
+             MainActivity since 0.6.2, not activities. Their class
+             names remain because the Rust core's JNI symbols are
+             bound to them. -->
     </application>
 
 </manifest>

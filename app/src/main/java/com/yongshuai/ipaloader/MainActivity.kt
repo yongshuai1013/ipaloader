@@ -3,14 +3,18 @@ package com.yongshuai.ipaloader
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.Intent
+import android.graphics.Color
 import android.os.Bundle
 import android.text.InputType
+import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.TextView
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -27,6 +31,7 @@ class MainActivity : Activity() {
     external fun nativeLogin(email: String, password: String, filesDir: String): String
     external fun nativeRestoreSession(filesDir: String): String
     external fun nativeLogout(filesDir: String): Boolean
+    external fun nativeListInventory(filesDir: String): String
 
     private lateinit var statusText: TextView
     private lateinit var progressBar: ProgressBar
@@ -38,10 +43,18 @@ class MainActivity : Activity() {
     private lateinit var accountText: TextView
     private lateinit var teamText: TextView
     private lateinit var logoutButton: Button
-    private lateinit var signButton: Button
-    private lateinit var installButton: Button
     private lateinit var loginForm: LinearLayout
     private lateinit var accountBox: LinearLayout
+
+    // 0.6.2 tab menu (always visible, independent of login state).
+    private lateinit var signPanel: SignActivity
+    private lateinit var installPanel: InstallActivity
+    private lateinit var pairingPanel: PairingPanel
+    private lateinit var importPanel: ImportPanel
+    private lateinit var inventoryPanel: InventoryPanel
+    private val tabLabels = mutableListOf<TextView>()
+    private val tabIndicators = mutableListOf<View>()
+    private var selectedTab = -1
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -100,27 +113,11 @@ class MainActivity : Activity() {
             text = getString(R.string.logout)
             setOnClickListener { startLogout() }
         }
-        signButton = Button(this).apply {
-            text = getString(R.string.sign_open)
-            setOnClickListener {
-                AppLog.write(filesDir, "開啟簽名頁")
-                startActivity(Intent(this@MainActivity, SignActivity::class.java))
-            }
-        }
-        installButton = Button(this).apply {
-            text = getString(R.string.install_open)
-            setOnClickListener {
-                AppLog.write(filesDir, "開啟安裝頁")
-                startActivity(Intent(this@MainActivity, InstallActivity::class.java))
-            }
-        }
         accountBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
             addView(accountText)
             addView(teamText)
-            addView(signButton)
-            addView(installButton)
             addView(logoutButton)
         }
 
@@ -130,7 +127,65 @@ class MainActivity : Activity() {
         layout.addView(logButton)
         layout.addView(loginForm)
         layout.addView(accountBox)
+
+        // -- Tab menu ---------------------------------------------------
+        // Always on screen, below the login block, and never gated by
+        // login state: the panels manage their own prerequisites
+        // (e.g. the sign flow stops with NO_SESSION) exactly as the
+        // standalone pages did.
+        signPanel = SignActivity(this) { file ->
+            selectTab(TAB_INSTALL)
+            installPanel.prePick(file, file.name)
+        }
+        installPanel = InstallActivity(this)
+        pairingPanel = PairingPanel(this, signPanel)
+        importPanel = ImportPanel(
+            this,
+            onSendToSign = { file ->
+                selectTab(TAB_SIGN)
+                signPanel.acceptExternalIpa(file)
+            },
+            onSendToInstall = { file ->
+                selectTab(TAB_INSTALL)
+                installPanel.prePick(file, file.name)
+            }
+        )
+        inventoryPanel = InventoryPanel(this)
+
+        val tabRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        tabRow.addView(makeTab(TAB_SIGN, R.string.tab_sign))
+        tabRow.addView(makeTab(TAB_INSTALL, R.string.tab_install))
+        tabRow.addView(makeTab(TAB_PAIRING, R.string.tab_pairing))
+        tabRow.addView(makeTab(TAB_IMPORT, R.string.tab_import))
+        tabRow.addView(makeTab(TAB_INVENTORY, R.string.tab_inventory))
+        val tabScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            setPadding(0, 24, 0, 0)
+            addView(tabRow)
+        }
+        layout.addView(tabScroll)
+
+        val contentBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(signPanel.root)
+            addView(installPanel.root)
+            addView(pairingPanel.root)
+            addView(importPanel.root)
+            addView(inventoryPanel.root)
+        }
+        val contentScroll = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+            addView(contentBox)
+        }
+        layout.addView(contentScroll)
         setContentView(layout)
+        selectTab(TAB_SIGN)
 
         prefillSavedCredentials()
 
@@ -145,6 +200,86 @@ class MainActivity : Activity() {
             }
             runOnUiThread { onRestoreResult(result) }
         }.start()
+    }
+
+    // -- Tab menu ---------------------------------------------------------
+
+    /** One text tab with a bottom indicator, Holo-dark styled. */
+    private fun makeTab(index: Int, labelRes: Int): View {
+        val indicator = View(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                4
+            )
+            setBackgroundColor(Color.rgb(0x33, 0x33, 0x33))
+        }
+        val label = TextView(this).apply {
+            text = getString(labelRes)
+            textSize = 15f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(0xAA, 0xAA, 0xAA))
+            setPadding(36, 16, 36, 16)
+        }
+        tabLabels.add(label)
+        tabIndicators.add(indicator)
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(label)
+            addView(indicator)
+            setOnClickListener { selectTab(index) }
+        }
+    }
+
+    private fun selectTab(index: Int) {
+        selectedTab = index
+        val roots = listOf(
+            signPanel.root,
+            installPanel.root,
+            pairingPanel.root,
+            importPanel.root,
+            inventoryPanel.root
+        )
+        roots.forEachIndexed { i, root ->
+            root.visibility = if (i == index) View.VISIBLE else View.GONE
+        }
+        tabLabels.forEachIndexed { i, tv ->
+            tv.setTextColor(
+                if (i == index) Color.WHITE else Color.rgb(0xAA, 0xAA, 0xAA)
+            )
+        }
+        tabIndicators.forEachIndexed { i, v ->
+            v.setBackgroundColor(
+                if (i == index) {
+                    Color.rgb(0x33, 0xB5, 0xE5)
+                } else {
+                    Color.rgb(0x33, 0x33, 0x33)
+                }
+            )
+        }
+        when (index) {
+            TAB_SIGN -> signPanel.onFirstShown()
+            TAB_INSTALL -> installPanel.onFirstShown()
+            TAB_PAIRING -> pairingPanel.onFirstShown()
+            TAB_IMPORT -> importPanel.onFirstShown()
+            TAB_INVENTORY -> inventoryPanel.onFirstShown()
+        }
+    }
+
+    /** Document-picker results are routed to the tab panels. */
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (::signPanel.isInitialized) {
+            signPanel.onActivityResult(requestCode, resultCode, data)
+        }
+        if (::installPanel.isInitialized) {
+            installPanel.onActivityResult(requestCode, resultCode, data)
+        }
+        if (::pairingPanel.isInitialized) {
+            pairingPanel.onActivityResult(requestCode, resultCode, data)
+        }
+        if (::importPanel.isInitialized) {
+            importPanel.onActivityResult(requestCode, resultCode, data)
+        }
     }
 
     private fun setBusy(busy: Boolean, status: String) {
@@ -397,6 +532,12 @@ class MainActivity : Activity() {
     }
 
     companion object {
+        private const val TAB_SIGN = 0
+        private const val TAB_INSTALL = 1
+        private const val TAB_PAIRING = 2
+        private const val TAB_IMPORT = 3
+        private const val TAB_INVENTORY = 4
+
         init {
             System.loadLibrary("ipaloader_core")
         }
