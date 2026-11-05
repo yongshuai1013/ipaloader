@@ -1,17 +1,9 @@
 package com.yongshuai.ipaloader
 
-import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.text.InputType
 import android.view.View
 import android.widget.Button
@@ -20,7 +12,6 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
-import android.widget.Toast
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -51,11 +42,6 @@ class MainActivity : Activity() {
     private lateinit var installButton: Button
     private lateinit var loginForm: LinearLayout
     private lateinit var accountBox: LinearLayout
-    private lateinit var wispStatusText: TextView
-    private lateinit var wispLoopbackText: TextView
-    private lateinit var wispLanText: TextView
-    private lateinit var wispProxyText: TextView
-    private lateinit var wispToggleButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -144,9 +130,7 @@ class MainActivity : Activity() {
         layout.addView(logButton)
         layout.addView(loginForm)
         layout.addView(accountBox)
-        layout.addView(buildWispSection())
         setContentView(layout)
-        refreshWispUi()
 
         prefillSavedCredentials()
 
@@ -233,120 +217,6 @@ class MainActivity : Activity() {
             }
             runOnUiThread { showLoginForm(getString(R.string.status_logged_out)) }
         }.start()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        refreshWispUi()
-    }
-
-    /** The 「本地轉發（WISP）」 section: status, copyable relay URLs,
-     *  start/stop toggle and a regenerate-secret button. */
-    private fun buildWispSection(): LinearLayout {
-        val title = TextView(this).apply {
-            text = getString(R.string.wisp_title)
-            textSize = 18f
-            setPadding(0, 48, 0, 0)
-        }
-        val desc = TextView(this).apply {
-            text = getString(R.string.wisp_desc)
-            textSize = 13f
-        }
-        wispStatusText = TextView(this).apply { textSize = 14f }
-        wispLoopbackText = TextView(this).apply {
-            textSize = 14f
-            setOnClickListener { copyToClipboard(WispStore.loopbackUrl(this@MainActivity)) }
-        }
-        wispLanText = TextView(this).apply {
-            textSize = 14f
-            setOnClickListener {
-                WispStore.lanUrl(this@MainActivity)?.let { copyToClipboard(it) }
-            }
-        }
-        wispProxyText = TextView(this).apply {
-            textSize = 14f
-            setOnClickListener { copyToClipboard(WispStore.proxyUrl(this@MainActivity)) }
-        }
-        wispToggleButton = Button(this).apply {
-            setOnClickListener { toggleWispRelay() }
-        }
-        val regenButton = Button(this).apply {
-            text = getString(R.string.wisp_regen)
-            setOnClickListener {
-                WispStore.regenerate(this@MainActivity)
-                AppLog.write(filesDir, "WISP：已重新產生密鑰")
-                refreshWispUi()
-            }
-        }
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(title)
-            addView(desc)
-            addView(wispStatusText)
-            addView(wispLoopbackText)
-            addView(wispLanText)
-            addView(wispProxyText)
-            addView(wispToggleButton)
-            addView(regenButton)
-        }
-    }
-
-    private fun refreshWispUi() {
-        if (!::wispStatusText.isInitialized) return
-        wispLoopbackText.text =
-            getString(R.string.wisp_url_loopback, WispStore.loopbackUrl(this))
-        wispProxyText.text =
-            getString(R.string.wisp_url_proxy, WispStore.proxyUrl(this))
-        val lan = WispStore.lanUrl(this)
-        wispLanText.text = if (lan != null) getString(R.string.wisp_url_lan, lan) else ""
-        wispLanText.visibility = if (lan != null) View.VISIBLE else View.GONE
-        when (WispRelayService.state) {
-            WispRelayService.State.RUNNING -> {
-                wispStatusText.text = getString(R.string.wisp_status_running)
-                wispToggleButton.text = getString(R.string.wisp_stop)
-            }
-            WispRelayService.State.FAILED -> {
-                wispStatusText.text = getString(
-                    R.string.wisp_status_failed,
-                    WispRelayService.failureMessage ?: ""
-                )
-                wispToggleButton.text = getString(R.string.wisp_start)
-            }
-            WispRelayService.State.STOPPED -> {
-                wispStatusText.text = getString(R.string.wisp_status_stopped)
-                wispToggleButton.text = getString(R.string.wisp_start)
-            }
-        }
-    }
-
-    private fun toggleWispRelay() {
-        if (WispRelayService.state == WispRelayService.State.RUNNING) {
-            WispRelayService.stop(this)
-            AppLog.write(filesDir, "WISP：用戶停止轉發")
-        } else {
-            requestNotificationPermissionIfNeeded()
-            WispRelayService.start(this)
-            AppLog.write(filesDir, "WISP：用戶啟動轉發")
-        }
-        refreshWispUi()
-        // The bind result (RUNNING / FAILED) arrives asynchronously
-        // from the server thread; re-read the state shortly after.
-        Handler(Looper.getMainLooper()).postDelayed({ refreshWispUi() }, 800)
-    }
-
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
-            PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001)
-        }
-    }
-
-    private fun copyToClipboard(text: String) {
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("wisp", text))
-        Toast.makeText(this, getString(R.string.wisp_copied), Toast.LENGTH_SHORT).show()
     }
 
     private fun onRestoreResult(result: String) {

@@ -11,8 +11,8 @@ android {
         applicationId = "com.yongshuai.ipaloader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "0.6.0"
+        versionCode = 17
+        versionName = "0.6.1"
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -67,9 +67,4 @@ dependencies {
     // the rustls-platform-verifier-android crate version pinned in
     // rust/Cargo.lock; the maven repo lives in settings.gradle.kts.
     implementation("org.rustls:rustls-platform-verifier:0.2.0")
-    // WebSocket server for the local WISP relay (WispServer.kt).
-    // Plain Java, works on Android; from Maven Central, which CI
-    // already uses. Its only transitive dependency is slf4j-api
-    // (no binding on Android — it just stays silent).
-    implementation("org.java-websocket:Java-WebSocket:1.5.7")
 }
