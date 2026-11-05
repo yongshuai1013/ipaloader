@@ -41,6 +41,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use idevice::lockdown::LockdownClient;
 use idevice::pairing_file::PairingFile;
+use idevice::services::heartbeat::HeartbeatClient;
 use idevice::provider::TcpProvider;
 use idevice::IdeviceService as _;
 use jni::objects::{GlobalRef, JObject, JString};
@@ -431,6 +432,59 @@ fn extract_app_bundle(ipa_path: &str, work_root: &std::path::Path) -> Result<Pat
     Ok(app_dir)
 }
 
+/// 0.6.5: spawn the Marco-Polo heartbeat loop on its own task.
+///
+/// idevice's own heartbeat docs state that iOS closes service
+/// connections when no heartbeat client is connected and
+/// answering — and the M4 real-device failures fit that shape
+/// exactly: discovery and the lockdown session worked, then the
+/// AFC channel died at its first operation (mk_dir) with a bare
+/// TLS EOF. So the install now keeps a heartbeat running from
+/// right after discovery until install_app returns. The loop is
+/// strictly advisory: a connect failure or a dead heartbeat only
+/// ends this task (with a log line), never the install itself.
+/// The polo log lines (first three, then every tenth) let the
+/// next real-device log show whether the heartbeat stayed alive
+/// for the whole install.
+fn spawn_heartbeat(provider: TcpProvider) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut client = match HeartbeatClient::connect(&provider).await {
+            Ok(c) => {
+                logf!("heartbeat: connected, starting marco/polo");
+                c
+            }
+            Err(e) => {
+                logf!("heartbeat: connect failed: {:?}", e);
+                return;
+            }
+        };
+        let mut interval: u64 = 15;
+        let mut count: u64 = 0;
+        loop {
+            match client.get_marco(interval).await {
+                Ok(new_interval) => {
+                    interval = new_interval;
+                    count += 1;
+                    if let Err(e) = client.send_polo().await {
+                        logf!("heartbeat: polo #{} send failed: {:?}", count, e);
+                        break;
+                    }
+                    if count <= 3 || count % 10 == 0 {
+                        logf!("heartbeat: polo #{} (interval {}s)", count, interval);
+                    }
+                }
+                Err(e) => {
+                    logf!(
+                        "heartbeat: marco failed after {} polos: {:?}",
+                        count, e
+                    );
+                    break;
+                }
+            }
+        }
+    })
+}
+
 async fn do_install(
     files_dir: String,
     ipa_path: String,
@@ -450,6 +504,17 @@ async fn do_install(
         }
     };
 
+    // 0.6.5: start the heartbeat as early as possible so it is
+    // already alive before the AFC channel opens (see
+    // spawn_heartbeat). It gets its own provider instance; the
+    // install below builds its usual one from the same pairing.
+    let heartbeat = spawn_heartbeat(TcpProvider {
+        addr: IpAddr::V4(found.ip),
+        scope_id: None,
+        pairing_file: pairing.clone(),
+        label: "ipaloader".to_string(),
+    });
+
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -460,6 +525,7 @@ async fn do_install(
     let app_dir = match extract_app_bundle(&ipa_path, &work_root) {
         Ok(d) => d,
         Err(e) => {
+            heartbeat.abort();
             let _ = std::fs::remove_dir_all(&work_root);
             logf!("install: extract failed: {}", e);
             return format!("ERR\nEXTRACT\n{}", e.replace('\n', " "));
@@ -479,11 +545,16 @@ async fn do_install(
     };
     let progress_bridge = bridge.clone();
     let progress = move |p: u64| progress_bridge.percent(p);
+    logf!("install: starting isideload install_app (heartbeat running concurrently)");
     let result = tokio::time::timeout(
         Duration::from_secs(900),
         isideload::sideload::install::install_app(&provider, &app_dir, progress),
     )
     .await;
+    // Every outcome lands here — success, device error and the
+    // 900s timeout alike — so the heartbeat stops exactly once.
+    heartbeat.abort();
+    logf!("install: heartbeat stopped");
     let _ = std::fs::remove_dir_all(&work_root);
     match result {
         Ok(Ok(())) => {
