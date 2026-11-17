@@ -25,8 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use isideload::anisette::remote_v3::RemoteV3AnisetteProvider;
-use isideload::anisette::AnisetteClientInfo;
+use isideload::anisette::remote_v3::{RemoteV3AnisetteProvider, ANISETTE_STATE_KEY};
 use isideload::auth::apple_account::{
     AppleAccount, TwoFactorCallbackParams, TwoFactorCallbackResponse,
 };
@@ -40,10 +39,20 @@ use jni::{JNIEnv, JavaVM};
 use rootcause::prelude::*;
 use rootcause::Report;
 
-/// Remote anisette (v3) server used for M2. StikStore runs a Sierra Mac
-/// ADI, so the client claim it reports is a Mac claim — the shape that
-/// passes Apple's current GrandSlam edge rules.
-const ANISETTE_URL: &str = "https://ani2.stikstore.app";
+/// Remote anisette (v3) server. 0.6.7: iloader's own server — the
+/// upstream isideload default. The M2-era pairing (ani2.stikstore.app
+/// plus the forced Mac15,7 client-info override) stopped passing
+/// Apple's SRP edge on 2026-11-17: initial login came back ec=-1
+/// "Unexpected response from IDMS Server" while iloader's current
+/// combination (this server + the server's own reported client
+/// info) logged in fine on the same account and network.
+const ANISETTE_URL: &str = "https://ani.iloader.app";
+
+/// Storage marker for the 0.6.7 anisette origin switch: the stored
+/// anisette state was provisioned against the old server and must
+/// not be carried to the new one (see anisette_provider).
+const ANISETTE_ORIGIN_KEY: &str = "anisette_origin";
+const ANISETTE_ORIGIN: &str = "iloader-v1";
 
 const SESSION_EMAIL_KEY: &str = "session_email";
 const SESSION_SPD_KEY: &str = "session_spd";
@@ -257,21 +266,21 @@ fn session_storage(files_dir: &str) -> FsStorage {
 }
 
 fn anisette_provider(files_dir: &str) -> Result<RemoteV3AnisetteProvider, Report> {
-    let provider = RemoteV3AnisetteProvider::new(
-        ANISETTE_URL,
-        Box::new(session_storage(files_dir)),
-        "0".to_string(),
-    )?;
-    // Same client-info override iloader ships: a modern Mac akd claim for
-    // every GrandSlam request (SRP, trusted-device 2FA and the SMS
-    // endpoints all share it), independent of what the anisette server
-    // happens to report. The anisette data itself still comes from the
-    // server's own (Mac) ADI.
-    Ok(provider.set_client_info_override(Some(AnisetteClientInfo {
-        client_info: "<Mac15,7> <macOS;27.0;26A5378j> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
-            .to_string(),
-        user_agent: "akd/1.0 CFNetwork/811.5.4".to_string(),
-    })))
+    let storage = session_storage(files_dir);
+    // 0.6.7 one-time reset: the stored anisette state was provisioned
+    // against ani2.stikstore.app; provisioning state is server-local,
+    // so drop it once and let the new server provision fresh. The
+    // account session keys are separate and untouched.
+    if storage.retrieve(ANISETTE_ORIGIN_KEY).ok().flatten().as_deref() != Some(ANISETTE_ORIGIN) {
+        let _ = storage.delete(ANISETTE_STATE_KEY);
+        let _ = storage.store(ANISETTE_ORIGIN_KEY, ANISETTE_ORIGIN);
+    }
+    // 0.6.7: no client-info override — the provider fetches the
+    // client info from the anisette server itself (/v3/client_info),
+    // the combination iloader ships and Apple currently accepts.
+    // The M2-era forced Mac15,7 claim sat on top of a Sierra ADI's
+    // data; that mismatch is what IDMS rejected (see ANISETTE_URL).
+    RemoteV3AnisetteProvider::new(ANISETTE_URL, Box::new(storage), "0".to_string())
 }
 
 fn save_session(files_dir: &str, account: &AppleAccount) -> Result<(), Report> {
