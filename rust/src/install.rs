@@ -128,18 +128,21 @@ async fn verify_candidate(
         pairing_file: pairing.clone(),
         label: "ipaloader".to_string(),
     };
-    let mut lockdown = LockdownClient::connect(&provider)
-        .await
-        .map_err(|e| format!("無法連上裝置的 lockdown：{}", short_line(&format!("{}", e))))?;
-    lockdown
-        .start_session(pairing)
-        .await
-        .map_err(|e| {
-            format!(
-                "lockdown 工作階段建立失敗：{}",
-                short_line(&format!("{}", e))
-            )
-        })?;
+    let mut lockdown = LockdownClient::connect(&provider).await.map_err(|e| {
+        // 0.6.8: the full error also goes to the log — until now it
+        // only reached the UI, so a failed Wi-Fi verify left no
+        // diagnosable trace in the log file (2026-11-17: every
+        // install died at LOCKDOWN with the reason unrecorded).
+        logf!("device probe: connect to {} failed: {}", ip, e);
+        format!("無法連上裝置的 lockdown：{}", short_line(&format!("{}", e)))
+    })?;
+    lockdown.start_session(pairing).await.map_err(|e| {
+        logf!("device probe: start_session with {} failed: {}", ip, e);
+        format!(
+            "lockdown 工作階段建立失敗：{}",
+            short_line(&format!("{}", e))
+        )
+    })?;
     let udid = lockdown
         .get_value(Some("UniqueDeviceID"), None)
         .await
@@ -226,9 +229,10 @@ async fn discover_device(
         }
     }
     logf!(
-        "device scan: {} host(s) with port {} open",
+        "device scan: {} host(s) with port {} open: {:?}",
         responders.len(),
-        LOCKDOWND_PORT
+        LOCKDOWND_PORT,
+        responders
     );
 
     let mut session_error: Option<String> = None;
