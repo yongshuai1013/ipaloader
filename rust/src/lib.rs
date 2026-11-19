@@ -1048,6 +1048,103 @@ fn do_pairing_info(files_dir: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 0.6.9: pairing record export + clear.
+//
+// Export: the stored record leaves the app as a standard lockdown
+// plist named `{UDID}.plist`, so tools that import pairing files
+// (SideStore reports "Invalid Pairing File" when a key is missing
+// or the UDID field is absent) accept it. The stored bytes are
+// normalized rather than copied verbatim: parsed, the UDID
+// backfilled from the stored identity when the record lacks one,
+// all ten lockdown keys asserted present and non-empty, then
+// re-serialized as an XML plist.
+//
+// Clear: deletes the three-file stored layout. Nothing in the
+// core caches the pairing in memory — every flow re-reads
+// `pairing.plist` from disk when it starts (install.rs
+// `load_pairing_file`, the sign flow's `load_pairing`) — so
+// deleting the files is a real clear, not a display change. An
+// operation already in flight keeps the clone it started with
+// and finishes or fails on its own; the next operation sees no
+// pairing. The record's contents are never logged; log lines
+// carry only the UDID prefix and byte counts.
+// ---------------------------------------------------------------------------
+
+/// Export entry point: read the stored record, normalize it via
+/// `build_pairing_export`, and write the result to `out_path`
+/// (the panel then copies it to the user-picked SAF destination,
+/// the same tmp-file pattern as the signing-key export).
+/// Result: `OK\n<udid>\n<name>` or `ERR\n<CODE>\n<message>`.
+fn do_export_pairing(files_dir: &str, out_path: &str) -> String {
+    let Some(info) = load_pairing(files_dir) else {
+        return "ERR\nNOPAIRING\n尚未配對：請先以 USB 配對或導入配對檔".to_string();
+    };
+    let path = pairing_dir(files_dir).join("pairing.plist");
+    let bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(e) => {
+            return format!("ERR\nPAIRING\n配對紀錄讀取失敗：{}", e);
+        }
+    };
+    let export = match build_pairing_export(&bytes, &info.udid) {
+        Ok(b) => b,
+        Err(msg) => {
+            logf!("pairing export rejected: {}", msg);
+            return format!("ERR\nPAIRING\n{}", msg);
+        }
+    };
+    let out = PathBuf::from(out_path);
+    if let Some(parent) = out.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&out, &export) {
+        return format!("ERR\nPAIRING\n匯出檔寫入失敗：{}", e);
+    }
+    let prefix: String = info.udid.chars().take(8).collect();
+    logf!(
+        "pairing exported: udid {}… ({} bytes)",
+        prefix,
+        export.len()
+    );
+    format!(
+        "OK\n{}\n{}",
+        info.udid.replace('\n', " "),
+        info.name.replace('\n', " ")
+    )
+}
+
+/// Clear entry point: delete the stored three-file layout (and
+/// any stale export tmp in the same directory). Reports
+/// `OK\nCLEARED` when a pairing existed, `OK\nNONE` when there
+/// was nothing to delete.
+fn do_clear_pairing(files_dir: &str) -> String {
+    let dir = pairing_dir(files_dir);
+    let existed =
+        load_pairing(files_dir).is_some() || dir.join("pairing.plist").exists();
+    let mut failure: Option<std::io::Error> = None;
+    for name in ["pairing.plist", "udid.txt", "name.txt", "pairing_export.plist"] {
+        match std::fs::remove_file(dir.join(name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                if failure.is_none() {
+                    failure = Some(e);
+                }
+            }
+        }
+    }
+    if let Some(e) = failure {
+        return format!("ERR\nPAIRING\n清除配對紀錄失敗：{}", e);
+    }
+    if existed {
+        logf!("pairing cleared");
+        "OK\nCLEARED".to_string()
+    } else {
+        "OK\nNONE".to_string()
+    }
+}
+
 /// The portal's DeveloperError (a server verdict) buried anywhere
 /// in a report's cause chain, if there is one.
 fn developer_error(report: &Report) -> Option<(i64, String)> {
@@ -1550,6 +1647,63 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeGetPairin
     make_jstring(&mut env, &text)
 }
 
+/// `external fun nativeExportPairing(filesDir, outPath): String`
+/// in `com.yongshuai.ipaloader.SignActivity` (0.6.9). Writes the
+/// normalized stored pairing record to `outPath` for the panel's
+/// SAF save. Result: `OK\n<udid>\n<name>` or
+/// `ERR\n<CODE>\n<message>`.
+#[no_mangle]
+pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeExportPairing(
+    mut env: JNIEnv,
+    this: JObject,
+    files_dir: JString,
+    out_path: JString,
+) -> jstring {
+    let files_dir = jstring_to_rust(&mut env, &files_dir);
+    let out_path = jstring_to_rust(&mut env, &out_path);
+    init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        do_export_pairing(&files_dir, &out_path)
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeExportPairing PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
+    make_jstring(&mut env, &text)
+}
+
+/// `external fun nativeClearPairing(filesDir): String` in
+/// `com.yongshuai.ipaloader.SignActivity` (0.6.9). Deletes the
+/// stored pairing record. Result: `OK\nCLEARED`, `OK\nNONE`, or
+/// `ERR\nPAIRING\n<message>`.
+#[no_mangle]
+pub extern "system" fn Java_com_yongshuai_ipaloader_SignActivity_nativeClearPairing(
+    mut env: JNIEnv,
+    this: JObject,
+    files_dir: JString,
+) -> jstring {
+    let files_dir = jstring_to_rust(&mut env, &files_dir);
+    init_core(&files_dir);
+    ensure_rpv_init(&mut env, &this);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        do_clear_pairing(&files_dir)
+    }));
+    let text = match result {
+        Ok(t) => t,
+        Err(payload) => {
+            let msg = panic_message(&*payload);
+            logf!("nativeClearPairing PANIC caught: {}", msg);
+            format!("ERR\nPANIC\n{}", msg.replace('\n', " "))
+        }
+    };
+    make_jstring(&mut env, &text)
+}
+
 // ---------------------------------------------------------------------------
 // 0.6.2: portal inventory view (certificates + App IDs) for the
 // main screen's inventory tab. Read-only: the session is restored
@@ -1926,5 +2080,8 @@ pub extern "system" fn Java_com_yongshuai_ipaloader_MainActivity_nativeImportSig
 }
 
 mod install;
+mod pairing_export;
 mod usbpair;
 mod usbmux;
+
+use pairing_export::build_pairing_export;

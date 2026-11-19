@@ -1,6 +1,7 @@
 package com.yongshuai.ipaloader
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -39,6 +40,11 @@ import java.io.File
  * (enumerate, permission, open, pick the usbmux interface) and
  * hands the bulk pipe ([UsbMuxLink]) to the Rust mux client,
  * which runs the protocol and lockdownd `Pair`.
+ *
+ * 0.6.9: a "pairing record" block under the device display
+ * exports the stored record as a standard `{UDID}.plist`
+ * (SAF save; the core normalizes and validates it first) or
+ * clears it after a confirmation dialog.
  */
 class PairingPanel(
     private val host: Activity,
@@ -60,8 +66,17 @@ class PairingPanel(
 
     private val deviceText: TextView
     private val importButton: Button
+    private val exportButton: Button
+    private val clearButton: Button
     private val usbStatus: TextView
     private val usbButton: Button
+
+    /** UDID of the currently stored pairing, null when unpaired. */
+    private var currentUdid: String? = null
+
+    /** Export tmp file waiting for its SAF destination. */
+    private var pendingExportFile: File? = null
+    private var exportBusy = false
 
     /** The panel's view hierarchy, built once and kept by the host. */
     val root: View
@@ -86,6 +101,30 @@ class PairingPanel(
         layout.addView(deviceTitle)
         layout.addView(deviceText)
         layout.addView(importButton)
+        val recordSpacer = View(host)
+        layout.addView(recordSpacer, LinearLayout.LayoutParams(1, 48))
+        val recordTitle = TextView(host).apply {
+            textSize = 16f
+            text = getString(R.string.pair_record_title)
+        }
+        exportButton = Button(host).apply {
+            text = getString(R.string.pair_export_button)
+            isEnabled = false
+            setOnClickListener { startExportPairing() }
+        }
+        val exportHint = TextView(host).apply {
+            textSize = 13f
+            text = getString(R.string.pair_export_hint)
+        }
+        clearButton = Button(host).apply {
+            text = getString(R.string.pair_clear_button)
+            isEnabled = false
+            setOnClickListener { confirmClearPairing() }
+        }
+        layout.addView(recordTitle)
+        layout.addView(exportButton)
+        layout.addView(exportHint)
+        layout.addView(clearButton)
         val spacer = View(host)
         layout.addView(spacer, LinearLayout.LayoutParams(1, 48))
         val usbTitle = TextView(host).apply {
@@ -130,7 +169,9 @@ class PairingPanel(
                 if (parts[0] == "OK") {
                     showPairing(parts.getOrElse(1) { "" }, parts.getOrElse(2) { "" })
                 } else {
+                    currentUdid = null
                     deviceText.text = getString(R.string.sign_device_none)
+                    updateRecordButtons()
                 }
             }
         }.start()
@@ -138,12 +179,21 @@ class PairingPanel(
 
     /** Shows the stored target device: name (if any) + UDID tail. */
     private fun showPairing(udid: String, name: String) {
+        currentUdid = udid.ifEmpty { null }
         val tail = udid.takeLast(8)
         deviceText.text = if (name.isNotEmpty()) {
             getString(R.string.sign_device_info, name, tail)
         } else {
             getString(R.string.sign_device_info_noname, tail)
         }
+        updateRecordButtons()
+    }
+
+    /** Export/clear act on the stored record; both need one. */
+    private fun updateRecordButtons() {
+        val enabled = currentUdid != null && !exportBusy
+        exportButton.isEnabled = enabled
+        clearButton.isEnabled = currentUdid != null
     }
 
     private fun pickPairing() {
@@ -156,6 +206,17 @@ class PairingPanel(
 
     /** Picker results, forwarded by the host activity. */
     fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == REQ_EXPORT_PAIRING) {
+            val uri = if (resultCode == Activity.RESULT_OK) data?.data else null
+            if (uri == null) {
+                pendingExportFile = null
+                exportBusy = false
+                updateRecordButtons()
+                return
+            }
+            onExportTargetChosen(uri)
+            return
+        }
         if (resultCode != Activity.RESULT_OK) return
         val uri = data?.data ?: return
         when (requestCode) {
@@ -212,6 +273,133 @@ class PairingPanel(
                 AppLog.write(filesDir, "配對：導入配對檔失敗（${parts.getOrElse(1) { "?" }}）")
                 refreshPairingUi()
             }
+        }
+    }
+
+    // --------------------------------------------------------
+    // 0.6.9: pairing record export (SAF) + clear. The core
+    // normalizes the record to a tmp file first (the signing-key
+    // export pattern), then the picked destination is filled in.
+    // --------------------------------------------------------
+
+    private fun startExportPairing() {
+        val udid = currentUdid ?: return
+        if (exportBusy) return
+        exportBusy = true
+        updateRecordButtons()
+        Thread {
+            val dir = File(filesDir, "export").apply { mkdirs() }
+            val tmp = File(dir, "pairing.plist")
+            val result = try {
+                signFacade.nativeExportPairing(filesDir.absolutePath, tmp.absolutePath)
+            } catch (e: UnsatisfiedLinkError) {
+                "ERR\nUNKNOWN\nRust core missing"
+            }
+            runOnUiThread { onExportPairingReady(result, tmp, udid) }
+        }.start()
+    }
+
+    private fun onExportPairingReady(result: String, tmp: File, udid: String) {
+        val parts = result.split("\n", limit = 3)
+        if (parts[0] == "OK") {
+            pendingExportFile = tmp
+            val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_TITLE, "$udid.plist")
+            }
+            startActivityForResult(intent, REQ_EXPORT_PAIRING)
+        } else {
+            exportBusy = false
+            updateRecordButtons()
+            Toast.makeText(
+                host,
+                getString(
+                    R.string.pair_export_failed,
+                    parts.getOrElse(2) { parts.getOrElse(1) { "" } }
+                ),
+                Toast.LENGTH_LONG
+            ).show()
+            AppLog.write(filesDir, "配對：匯出配對檔失敗（${parts.getOrElse(1) { "?" }}）")
+            refreshPairingUi()
+        }
+    }
+
+    private fun onExportTargetChosen(uri: Uri) {
+        val tmp = pendingExportFile
+        pendingExportFile = null
+        val udid = currentUdid ?: ""
+        Thread {
+            val ok = tmp != null && try {
+                contentResolver.openOutputStream(uri)?.use { output ->
+                    tmp.inputStream().use { input -> input.copyTo(output) }
+                } != null
+            } catch (e: Exception) {
+                false
+            }
+            runOnUiThread {
+                exportBusy = false
+                updateRecordButtons()
+                if (ok) {
+                    Toast.makeText(host, getString(R.string.pair_export_ok), Toast.LENGTH_SHORT)
+                        .show()
+                    AppLog.write(filesDir, "配對：已匯出配對檔（UDID ${udid.take(8)}…）")
+                } else {
+                    Toast.makeText(
+                        host,
+                        getString(R.string.pair_export_write_failed),
+                        Toast.LENGTH_LONG
+                    ).show()
+                    AppLog.write(filesDir, "配對：匯出寫入所選位置失敗")
+                }
+            }
+        }.start()
+    }
+
+    private fun confirmClearPairing() {
+        if (currentUdid == null) return
+        AlertDialog.Builder(host)
+            .setTitle(getString(R.string.pair_clear_confirm_title))
+            .setMessage(getString(R.string.pair_clear_confirm_message))
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(getString(R.string.pair_clear_button)) { _, _ ->
+                startClearPairing()
+            }
+            .show()
+    }
+
+    private fun startClearPairing() {
+        Thread {
+            val result = try {
+                signFacade.nativeClearPairing(filesDir.absolutePath)
+            } catch (e: UnsatisfiedLinkError) {
+                "ERR\nUNKNOWN\nRust core missing"
+            }
+            runOnUiThread { onClearPairingDone(result) }
+        }.start()
+    }
+
+    private fun onClearPairingDone(result: String) {
+        val parts = result.split("\n", limit = 3)
+        if (parts[0] == "OK") {
+            currentUdid = null
+            deviceText.text = getString(R.string.sign_device_none)
+            updateRecordButtons()
+            usbStatus.text = ""
+            Toast.makeText(host, getString(R.string.pair_clear_ok), Toast.LENGTH_SHORT)
+                .show()
+            AppLog.write(filesDir, "配對：已清除配對紀錄")
+        } else {
+            Toast.makeText(
+                host,
+                getString(
+                    R.string.pair_clear_failed,
+                    parts.getOrElse(2) { parts.getOrElse(1) { "" } }
+                ),
+                Toast.LENGTH_LONG
+            ).show()
+            AppLog.write(filesDir, "配對：清除配對紀錄失敗（${parts.getOrElse(1) { "?" }}）")
+            refreshPairingUi()
         }
     }
 
@@ -462,6 +650,7 @@ class PairingPanel(
 
     companion object {
         private const val REQ_PICK_PAIRING = 4301
+        private const val REQ_EXPORT_PAIRING = 4302
         private const val APPLE_VID = 0x05AC
         private const val ACTION_USB_PERMISSION =
             "com.yongshuai.ipaloader.USB_PERMISSION"

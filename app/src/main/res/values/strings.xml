@@ -74,6 +74,17 @@
     <string name="pair_usb_lost">USB 傳輸中斷，請確認線材連接後再試</string>
     <string name="pair_usb_passcode">iPhone 要求先解鎖並輸入密碼後再配對</string>
     <string name="pair_usb_failed">USB 配對失敗：%1$s</string>
+    <string name="pair_record_title">配對紀錄</string>
+    <string name="pair_export_button">匯出配對檔…</string>
+    <string name="pair_export_hint">匯出的檔案包含主機私鑰，請妥善保管，勿隨意傳給他人。</string>
+    <string name="pair_export_ok">已匯出配對檔</string>
+    <string name="pair_export_failed">匯出配對檔失敗：%1$s</string>
+    <string name="pair_export_write_failed">匯出寫入所選位置失敗</string>
+    <string name="pair_clear_button">清除配對紀錄</string>
+    <string name="pair_clear_confirm_title">清除配對紀錄？</string>
+    <string name="pair_clear_confirm_message">清除後，本機儲存的配對紀錄會被刪除；下次以 USB 連接時，iPhone 會重新跳出「信任這部電腦」並需要重新配對。在重新配對前，Wi-Fi 簽名與安裝無法進行。</string>
+    <string name="pair_clear_ok">已清除配對紀錄</string>
+    <string name="pair_clear_failed">清除配對紀錄失敗：%1$s</string>
     <string name="sign_stage_device">裝置（註冊到團隊）</string>
     <string name="sign_device_missing">尚未導入配對檔，無法註冊目標裝置。請先點「導入配對檔」選取與 iPhone 配對產生的配對檔，再重新簽名。</string>
     <string name="sign_failed_portal">Apple 開發者服務回報錯誤：%1$s</string>

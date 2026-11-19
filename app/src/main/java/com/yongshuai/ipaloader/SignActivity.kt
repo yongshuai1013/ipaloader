@@ -57,6 +57,23 @@ class SignActivity(
     external fun nativeGetPairing(filesDir: String): String
 
     /**
+     * 0.6.9: writes the stored pairing record, normalized to a
+     * complete lockdown plist (UDID backfilled, ten keys
+     * asserted), to [outPath] for the pairing panel's SAF save.
+     * Blocking; call from a worker thread. "OK\n<udid>\n<name>" /
+     * "ERR\n<CODE>\n<message>".
+     */
+    external fun nativeExportPairing(filesDir: String, outPath: String): String
+
+    /**
+     * 0.6.9: deletes the stored pairing record (the core keeps
+     * no in-memory copy, so the next flow sees no pairing).
+     * Blocking; call from a worker thread. "OK\nCLEARED" /
+     * "OK\nNONE" / "ERR\n<CODE>\n<message>".
+     */
+    external fun nativeClearPairing(filesDir: String): String
+
+    /**
      * 0.6.3: pairs with the USB-connected device through
      * [link] (bulk pipe to the usbmux interface) and stores
      * the resulting pairing like an imported file. Blocking;
