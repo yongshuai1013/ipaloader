@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use super::middleware::WasmProxyMiddleware;
 use plist::Dictionary;
 use plist_macro::plist_to_xml_string;
@@ -16,6 +18,122 @@ use crate::sideload::cert_identity::APPLE_ROOT;
 use crate::{SideloadError, anisette::AnisetteClientInfo, util::plist::PlistDataExtract};
 
 const URL_BAG: &str = "https://gsa.apple.com/grandslam/GsService2/lookup";
+
+/// Capture hook for the outgoing GrandSlam request text (ipaloader
+/// branch `capture-srp`, built for the SideStore 503 byte-level
+/// comparison): the host crate registers a sink that appends each
+/// formatted block to its diagnostic log. When no sink is registered
+/// (every other consumer of this crate) capture is a no-op, and
+/// request construction and sending are completely untouched — the
+/// capture only reads values that were already built for sending.
+static SRP_REQUEST_CAPTURE: OnceLock<fn(&str)> = OnceLock::new();
+
+/// Register the sink that receives one formatted text block per
+/// outgoing GrandSlam request (the URL bag lookup plus every plist
+/// request, which includes the SRP init/complete pair). Called once
+/// by the host at startup; later calls are ignored.
+pub fn set_srp_request_capture(sink: fn(&str)) {
+    let _ = SRP_REQUEST_CAPTURE.set(sink);
+}
+
+fn emit_srp_capture(block: &str) {
+    if let Some(sink) = SRP_REQUEST_CAPTURE.get() {
+        sink(block);
+    }
+}
+
+/// The step name of a plist request, taken from the body's Request
+/// dictionary ("init", "complete", "apptokens", ...). Falls back to
+/// "plist" when the body carries no operation tag.
+fn srp_step_name(body: &Dictionary) -> String {
+    body.get("Request")
+        .and_then(|v| v.as_dictionary())
+        .and_then(|request| request.get("o"))
+        .and_then(|o| o.as_string())
+        .unwrap_or("plist")
+        .to_string()
+}
+
+/// Render one outgoing request for the capture log: step name,
+/// method, full URL, every header on its own line, then the body
+/// verbatim between the `===SRP-REQ <step> body begin/end===`
+/// delimiters. A body that is not clean UTF-8 text is rendered as
+/// base64 of the exact bytes instead, so the log always holds the
+/// request byte-for-byte.
+fn format_srp_capture(
+    step: &str,
+    method: &str,
+    url: &str,
+    headers: &HeaderMap,
+    body: Option<&[u8]>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("===SRP-REQ {step} begin===\n"));
+    out.push_str(&format!("{method} {url}\n"));
+    for (name, value) in headers.iter() {
+        match value.to_str() {
+            Ok(v) => out.push_str(&format!("{name}: {v}\n")),
+            Err(_) => out.push_str(&format!(
+                "{name}: <non-text header value, base64> {}\n",
+                base64_encode(value.as_bytes())
+            )),
+        }
+    }
+    match body {
+        Some(bytes) if !bytes.is_empty() => {
+            out.push_str(&format!("===SRP-REQ {step} body begin===\n"));
+            match std::str::from_utf8(bytes) {
+                Ok(text)
+                    if text
+                        .chars()
+                        .all(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t')) =>
+                {
+                    out.push_str(text);
+                    if !text.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
+                _ => {
+                    out.push_str(
+                        "(body is not plain UTF-8 text; base64 of the exact bytes follows)\n",
+                    );
+                    out.push_str(&base64_encode(bytes));
+                    out.push('\n');
+                }
+            }
+            out.push_str(&format!("===SRP-REQ {step} body end===\n"));
+        }
+        _ => out.push_str("(no request body)\n"),
+    }
+    out.push_str(&format!("===SRP-REQ {step} end===\n"));
+    out
+}
+
+/// Minimal RFC 4648 base64 encoder (standard alphabet, with
+/// padding), so the capture needs no extra dependency.
+fn base64_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let n = ((chunk[0] as u32) << 16)
+            | ((*chunk.get(1).unwrap_or(&0) as u32) << 8)
+            | (*chunk.get(2).unwrap_or(&0) as u32);
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
 
 pub struct GrandSlam {
     pub client: reqwest_middleware::ClientWithMiddleware,
@@ -69,6 +187,13 @@ impl GrandSlam {
         mut base_headers: HeaderMap,
     ) -> Result<Dictionary, Report> {
         debug!("Fetching URL bag from GrandSlam");
+        emit_srp_capture(&format_srp_capture(
+            "lookup",
+            "GET",
+            URL_BAG,
+            &base_headers,
+            None,
+        ));
         let resp = client
             .get(URL_BAG)
             .headers(base_headers)
@@ -159,6 +284,30 @@ impl GrandSlam {
         additional_headers: Option<HeaderMap>,
         retry_limit: Option<u32>,
     ) -> Result<Dictionary, Report> {
+        let body_string = plist_to_xml_string(body);
+        if SRP_REQUEST_CAPTURE.get().is_some() {
+            // Read-only capture of the request exactly as it is about
+            // to be sent below: the base headers from post() with the
+            // caller's additional headers merged over them (the same
+            // per-name insert semantics reqwest applies), plus the
+            // serialized body. A failure to rebuild the base headers
+            // here only skips the capture; post() below surfaces any
+            // real error exactly as before.
+            if let Ok(mut merged) = Self::base_headers(&self.client_info, false) {
+                if let Some(extra) = &additional_headers {
+                    for (name, value) in extra.iter() {
+                        merged.insert(name.clone(), value.clone());
+                    }
+                }
+                emit_srp_capture(&format_srp_capture(
+                    &srp_step_name(body),
+                    "POST",
+                    url,
+                    &merged,
+                    Some(body_string.as_bytes()),
+                ));
+            }
+        }
         let result = self
             .post(url)?
             .headers(
@@ -166,7 +315,7 @@ impl GrandSlam {
                     .clone()
                     .unwrap_or_else(reqwest::header::HeaderMap::new),
             )
-            .body(plist_to_xml_string(body))
+            .body(body_string)
             .send()
             .await
             .context("Failed to send grandslam request")?;

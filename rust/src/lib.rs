@@ -137,6 +137,40 @@ macro_rules! logf {
     };
 }
 
+/// Append a preformatted multi-line block to the diagnostic log,
+/// verbatim — unlike log_line this does NOT flatten newlines. It is
+/// the sink for the SRP request capture (branch `capture-srp`): the
+/// vendored isideload GrandSlam code formats each outgoing SRP
+/// request (URL bag lookup, init, complete) and hands the block to
+/// this function through
+/// `isideload::auth::grandslam::set_srp_request_capture`, so the log
+/// page holds the request text byte-for-byte for comparison against
+/// the SideSign stack. SRP requests carry no password and no session
+/// material (init holds the account name and the SRP parameters,
+/// complete holds proof values), so the standing rule that
+/// passwords, 2FA codes and session/token contents are never logged
+/// is untouched.
+fn log_raw_block(block: &str) {
+    static BLOCK_LOCK: Mutex<()> = Mutex::new(());
+    let Some(path) = LOG_PATH.get() else {
+        return;
+    };
+    let _guard = BLOCK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = write!(f, "[{}] [core] SRP capture block:\n{}", timestamp(), block);
+        if !block.ends_with('\n') {
+            let _ = writeln!(f);
+        }
+    }
+}
+
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         s.to_string()
@@ -252,6 +286,11 @@ fn init_core(files_dir: &str) {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         log_line("core init: rustls CryptoProvider (aws-lc-rs) installed");
         let _ = isideload::init();
+        // Branch `capture-srp`: route the vendored GrandSlam SRP
+        // request capture into this app's diagnostic log (see
+        // log_raw_block). Registration only — no request is altered.
+        isideload::auth::grandslam::set_srp_request_capture(log_raw_block);
+        log_line("core init: SRP request capture sink registered (capture-srp)");
     });
 }
 
